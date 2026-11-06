@@ -127,10 +127,68 @@ jobs:
           fi
           echo "凭据格式正常"
 
-      - uses: docker/login-action@v4
-        with:
-          username: ${{ env.DH_USER }}
-          password: ${{ env.DH_TOKEN }}
+      # 登录分两步，为了把两种完全不同的故障分开：
+      #
+      # 「malformed HTTP Authorization header」这个报错有两种成因，外观一模一样：
+      #   ① 凭据真的无效；
+      #   ② daemon 到 registry 的链路被干扰，响应里的 WWW-Authenticate 头不规范，
+      #      daemon 解析失败——此时 token 完全没问题，重试往往就过。
+      #
+      # 先用 curl 直连 auth.docker.io 换票（不经过 daemon），就能确定是哪种：
+      # 200 说明凭据有效、问题在链路；401 才是 token 真错了。
+      - name: 登录 Docker Hub
+        run: |
+          set -uo pipefail
+
+          # 注意：curl 连接失败时 -w 自己就会输出 000，这里不能再 `|| echo 000`
+          # 补一次，否则会拼成 "000000"，下面 000 分支永远匹配不上（实测踩过）。
+          code="$(curl -sS -o /tmp/auth.json -w '%{http_code}' \
+            -u "${DH_USER}:${DH_TOKEN}" \
+            "https://auth.docker.io/token?service=registry.docker.io&scope=repository:${DH_USER}/${IMAGE_NAME}:pull,push" 2>/dev/null)"
+          code="${code:-000}"
+          echo "auth.docker.io 换票：HTTP $code"
+
+          case "$code" in
+            200)
+              got="$(python3 -c "import json;print(len(json.load(open('/tmp/auth.json')).get('token','')))")"
+              echo "  凭据有效（换到 token ${got} 字符）。问题在 daemon → registry 链路，走重试"
+              ;;
+            401)
+              echo "::error::Docker Hub 判定凭据无效。去 hub.docker.com → Account settings → Personal access tokens 重新生成一个 Read & Write 权限的 token（注意不要用登录密码）"
+              exit 1
+              ;;
+            000)
+              echo "::error::连不上 auth.docker.io，runner 网络异常，重跑一次即可"
+              exit 1
+              ;;
+            *)
+              echo "::warning::意外响应 $code，继续尝试登录"
+              head -c 200 /tmp/auth.json || true
+              echo
+              ;;
+          esac
+
+          if [ -f ~/.docker/config.json ]; then
+            echo "--- 登录前已有的 docker 凭据 ---"
+            python3 -c "import json;print(list(json.load(open('$HOME/.docker/config.json')).get('auths',{}).keys()))" 2>/dev/null || echo "(读取失败)"
+          fi
+
+          # 不用 login-action：它构建的 header 遇到不规范的 challenge 更容易触发
+          # 上面那个报错，且失败后没有重试。这里自己循环，且每次都 login 一次纯 CLI。
+          ok=0
+          for i in 1 2 3; do
+            echo "第 $i 次 docker login ..."
+            if printf '%s' "${DH_TOKEN}" | docker login docker.io -u "${DH_USER}" --password-stdin; then
+              ok=1
+              break
+            fi
+            if [ "$i" -lt 3 ]; then echo "失败，10 秒后重试"; sleep 10; fi
+          done
+          if [ "$ok" -ne 1 ]; then
+            echo "::error::三次登录都失败。若上面换票是 HTTP 200，说明是 runner 到 registry-1.docker.io 的链路问题，过几分钟重跑 workflow 即可（不是配置错了）"
+            exit 1
+          fi
+          echo "登录成功"
 
       - uses: docker/build-push-action@v7
         id: build
