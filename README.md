@@ -50,7 +50,59 @@
 
 ## 快速开始
 
-**方式一：拉现成镜像**（不用 clone，NAS 面板里填也一样）
+**方式一：compose 拉现成镜像**（推荐，不用 clone）
+
+把下面存成 `docker-compose.yml`，同目录执行 `docker compose up -d`：
+
+```yaml
+services:
+  wx-mcp-gateway:
+    image: aaron2024s/wx-mcp-gateway:0.3.0
+    container_name: wx-mcp-gateway
+    restart: unless-stopped
+
+    ports:
+      # 冒号右边是容器内端口，必须和下面 PORT 一致。
+      # 想改端口：两处一起改，或者用 ${PORT:-7337} 配合 .env。
+      - "7337:7337"
+
+    environment:
+      - TZ=Asia/Shanghai
+      - PORT=7337
+      - GATEWAY_DATA=/data
+      - GATEWAY_CONFIG=/data/config.json
+      # 应用凭据走环境变量，别写进 config.json（那个文件要能进 git）
+      # - MAILNEST_TOKEN=你的令牌
+      # - DEEPSEEK_API_KEY=你的 key
+
+    volumes:
+      # 这一个目录装了全部状态：配置、登录密码、微信绑定、调用日志、AI 密钥
+      - ./data:/data
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+```
+
+首次启动时 `data/` 里没有 `config.json`，容器会自己从镜像内的示例复制一份，所以不用先准备文件。起来后打开 `http://<NAS的IP>:7337` 设置访问密码。
+
+**要连其他应用（如 MailNest）时，网关必须和它在同一个 docker 网络**，否则 `http://mailnest:8006/mcp` 这种服务名解析不到。在 compose 里补上：
+
+```yaml
+    networks:
+      - nas
+
+networks:
+  nas:
+    external: true
+    name: nas        # 换成 docker network ls 里看到的真实网络名
+```
+
+不确定网络名就先去目标应用的 compose 里看，或者 `docker network ls`。连不上时的表现是日志里出现“解析主机失败”，而不是配置报错。
+
+**方式二：docker run**（不用 compose 的单条命令）
 
 ```bash
 mkdir -p /volume1/docker/wx-mcp-gateway/data
@@ -67,7 +119,7 @@ docker run -d --name wx-mcp-gateway \
 
 镜像同时提供 `linux/amd64` 与 `linux/arm64`，Intel 的 NAS 和 ARM 的群晖都能直接拉。
 
-**方式二：从源码构建**
+**方式三：从源码构建**
 
 ```bash
 git clone https://github.com/aaron2024S/wx-mcp-gateway.git
