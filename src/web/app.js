@@ -446,7 +446,7 @@ bindSetting('#setLlmDefault', 'llm_default', (v) => v || '');
 
 // ---- 添加/编辑应用向导 ------------------------------------------------
 
-let WZ = { step: 1, editId: null, tested: false, tools: [], picked: {} };
+let WZ = { step: 1, editId: null, tested: false, tools: [], picked: {}, hasFull: false };
 
 function setStep(n) {
   WZ.step = n;
@@ -461,7 +461,7 @@ function setStep(n) {
 }
 
 function openWizard(appId) {
-  WZ = { step: 1, editId: appId, tested: false, tools: [], picked: {} };
+  WZ = { step: 1, editId: appId, tested: false, tools: [], picked: {}, hasFull: false };
 
   const app = appId ? S.data.apps.find((a) => a.id === appId) : null;
   $('#wzLabel').value = app?.label || '';
@@ -482,10 +482,18 @@ function openWizard(appId) {
   // 编辑时直接进表单：地址和端口都是现成的，不用重走一遍
   if (app) {
     WZ.tested = true;
-    WZ.tools = S.data.tools.filter((t) => t.appId === appId).map((t) => ({ ...t }));
+    // 用服务端「现在有」的全量工具。只读 this.tools 的话，应用侧新增的工具
+    // 早被 include 白名单过滤掉了，编辑页里根本看不见，只能点一次测试连接绕出来。
+    const avail = app.available || [];
+    WZ.hasFull = avail.length > 0;
+    WZ.tools = avail.length
+      ? avail.map((t) => ({ ...t, appId: app.id, appLabel: app.label || app.id }))
+      : S.data.tools.filter((t) => t.appId === appId).map((t) => ({ ...t }));
     WZ.picked = {};
     const inc = app.tools?.include || [];
-    for (const t of WZ.tools) WZ.picked[t.name] = inc.length ? inc.includes(t.name) : true;
+    for (const t of WZ.tools) {
+      WZ.picked[t.name] = avail.length ? t.enabled !== false : (inc.length ? inc.includes(t.name) : true);
+    }
     buildTools();
   }
   setStep(1);
@@ -497,7 +505,9 @@ function closeWizard() {
 }
 
 function buildTools() {
-  const hint = `发现 ${WZ.tools.length} 个工具。只勾你日常真的会用的——放太多会稀释识别准确率。`;
+  // enabled 只有编辑时才有：服务端报的是「现在是否启用」，用来标出后来新增/被关掉的
+  const off = WZ.tools.filter((t) => t.enabled === false).length;
+  const hint = `发现 ${WZ.tools.length} 个工具${off ? `，其中 ${off} 个还没启用（应用侧新加的多半在这里）` : ''}。只勾你日常真的会用的——放太多会稀释识别准确率。`;
   $('#toolHint').textContent = hint;
 
   const order = { read: 0, write: 1, high: 2 };
@@ -511,6 +521,7 @@ function buildTools() {
         <div class="tn">${esc(t.name)}</div>
         <div class="td2">${esc(t.title || t.description || '')}</div>
       </div>
+      ${t.enabled === false ? '<span class="badge ghost">未启用</span>' : ''}
       <span class="badge ${RISK_CLS[t.risk]}">${RISK[t.risk]}</span>
     </div>`;
   }).join('');
@@ -560,6 +571,7 @@ $('#testBtn').onclick = async () => {
     box.classList.add('on', r.ok ? 'ok' : 'bad');
     if (r.ok) {
       WZ.tested = true;
+      WZ.hasFull = true;      // r.tools 是服务端此刻的全量清单
       WZ.tools = r.tools;
       WZ.picked = {};
       for (const t of r.tools) WZ.picked[t.name] = t.risk === 'read';   // 只读默认勾，其余手动
@@ -603,13 +615,17 @@ $('#wzNext').onclick = async () => {
   if (!include.length) { toast('至少勾一个工具'); return; }
   if (!draft.id) { toast('缺少标识'); return; }
 
+  // 全勾就等于不设白名单：include 留空 = 全放开，应用侧以后新增的工具
+  // 不用回来改配置就能直接生效。只有真的想限制时才写死名单。
+  const whitelist = (WZ.hasFull && include.length === WZ.tools.length) ? [] : include;
+
   const btn = $('#wzNext');
   btn.disabled = true;
   btn.textContent = '保存中…';
   try {
     const r = await api('/api/apps', {
       method: 'POST',
-      body: { ...draft, token: $('#wzToken').value, tools: { include } },
+      body: { ...draft, token: $('#wzToken').value, tools: { include: whitelist } },
     });
     closeWizard();
     await refreshAll();

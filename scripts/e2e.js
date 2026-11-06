@@ -32,6 +32,43 @@ const ok = (name, cond, extra = '') => {
   else { console.log(`  ✗ ${name} ${extra}`); process.exitCode = 1; }
 };
 
+// 假 MCP 的能力清单。往 EXTRA_TOOLS 里塞一条，就能模拟「应用侧更新了能力」。
+const EXTRA_TOOLS = [];
+const BASE_TOOLS = [
+  {
+    name: 'status',
+    title: '查看状态',
+    description: '查询当前状态概览',
+    inputSchema: { type: 'object', properties: {} },
+    annotations: { readOnlyHint: true },
+  },
+  {
+    name: 'list_messages',
+    title: '列出邮件',
+    description: '按时间倒序列出邮件摘要，含发件人、主题、时间',
+    inputSchema: { type: 'object', properties: {} },
+    annotations: { readOnlyHint: true },
+  },
+  {
+    name: 'send_message',
+    title: '发送邮件',
+    description: '向指定收件人发送邮件',
+    inputSchema: {
+      type: 'object',
+      properties: { to: { type: 'string', description: '收件人邮箱' }, subject: { type: 'string', description: '主题' }, text: { type: 'string', description: '正文' } },
+      required: ['to', 'subject', 'text'],
+    },
+    annotations: { destructiveHint: true },
+  },
+  {
+    name: 'reboot',
+    title: '重启路由器',
+    description: '重启设备，网络会中断',
+    inputSchema: { type: 'object', properties: {} },
+    annotations: { destructiveHint: true },
+  },
+];
+
 // ---- 假 MCP server ----------------------------------------------------
 
 const calls = [];   // 收到的 tools/call
@@ -58,42 +95,7 @@ function mockMcp() {
         return;
       }
       if (body.method === 'tools/list') {
-        return reply({
-          tools: [
-            {
-              name: 'status',
-              title: '查看状态',
-              description: '查询当前状态概览',
-              inputSchema: { type: 'object', properties: {} },
-              annotations: { readOnlyHint: true },
-            },
-            {
-              name: 'list_messages',
-              title: '列出邮件',
-              description: '按时间倒序列出邮件摘要，含发件人、主题、时间',
-              inputSchema: { type: 'object', properties: {} },
-              annotations: { readOnlyHint: true },
-            },
-            {
-              name: 'send_message',
-              title: '发送邮件',
-              description: '向指定收件人发送邮件',
-              inputSchema: {
-                type: 'object',
-                properties: { to: { type: 'string', description: '收件人邮箱' }, subject: { type: 'string', description: '主题' }, text: { type: 'string', description: '正文' } },
-                required: ['to', 'subject', 'text'],
-              },
-              annotations: { destructiveHint: true },
-            },
-            {
-              name: 'reboot',
-              title: '重启路由器',
-              description: '重启设备，网络会中断',
-              inputSchema: { type: 'object', properties: {} },
-              annotations: { destructiveHint: true },
-            },
-          ],
-        });
+        return reply({ tools: [...BASE_TOOLS, ...EXTRA_TOOLS] });
       }
       if (body.method === 'tools/call') {
         const { name, arguments: args } = body.params;
@@ -286,6 +288,37 @@ async function main() {
   ok('例子来自真实工具', /列出邮件|搜索邮件|列出邮箱账号/.test(help), help);
   ok('不再写死邮箱示例', !/看有哪些邮箱/.test(help), help);
   ok('指令清单一并给出', /\/menu/.test(help) && /\/status/.test(help), help);
+
+  console.log('\n=== ④c 应用侧更新能力，这边不用重新添加 ===');
+  // 后台每 5 分钟跑一次 refreshAll，这里手动跑一次等价于等它到点。
+  EXTRA_TOOLS.push({
+    name: 'archive_message',
+    title: '归档邮件',
+    description: '把邮件从收件箱移到归档',
+    inputSchema: { type: 'object', properties: {} },
+    annotations: { readOnlyHint: false },
+  });
+  await registry.refreshAll();
+  let avail = registry.stats().apps[0].available || [];
+  ok('刷新后能拉到新工具', avail.some((t) => t.name === 'archive_message'), JSON.stringify(avail.map((t) => t.name)));
+  ok('没设白名单时新工具直接生效', registry.tools.some((t) => t.name === 'archive_message'));
+
+  // 反过来：设了 include 白名单，新工具会被挡住——但必须仍然出现在 available 里，
+  // 否则编辑页看不到它，用户永远没机会把它勾上。
+  const mailApp = registry.getApp('mail').cfg;
+  mailApp.tools = { include: ['status'] };
+  await registry.refreshAll();
+  avail = registry.stats().apps[0].available || [];
+  const fresh = avail.find((t) => t.name === 'archive_message');
+  ok('白名单外的新工具仍出现在全量清单里', !!fresh);
+  ok('并标注为未启用', fresh?.enabled === false);
+  ok('索引里确实没有它', !registry.tools.some((t) => t.name === 'archive_message'));
+
+  // 复原，别影响后面几条用例
+  mailApp.tools = {};
+  EXTRA_TOOLS.length = 0;
+  await registry.refreshAll();
+  ok('复原后回到 4 个工具', registry.tools.length === 4, JSON.stringify(registry.tools.map((t) => t.name)));
 
   console.log('\n=== ⑤ 重投去重 ===');
   outbox.length = 0;

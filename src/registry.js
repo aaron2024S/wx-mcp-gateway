@@ -351,15 +351,31 @@ export class Registry {
   }
 
   stats() {
-    const apps = [...this.apps.values()].map((e) => ({
-      id: e.cfg.id,
-      label: e.cfg.label || e.cfg.id,
-      status: e.status,
-      error: e.error,
-      toolCount: e.toolCount,
-      protocolVersion: e.protocolVersion,
-      serverInfo: e.serverInfo,
-    }));
+    const apps = [...this.apps.values()].map((e) => {
+      const include = e.cfg?.tools?.include || [];
+      const exclude = e.cfg?.tools?.exclude || [];
+      const overrides = e.cfg?.tools?.risk_overrides || {};
+      return {
+        id: e.cfg.id,
+        label: e.cfg.label || e.cfg.id,
+        status: e.status,
+        error: e.error,
+        toolCount: e.toolCount,
+        protocolVersion: e.protocolVersion,
+        serverInfo: e.serverInfo,
+        // 服务端「现在有」的全量工具，含没启用的。
+        // 编辑应用时前端靠它才能看到应用侧新增的工具——只给 this.tools 的话，
+        // 新工具被 include 白名单过滤掉，用户永远勾不上。
+        available: (e.rawTools || []).map((t) => ({
+          name: t.name,
+          title: t.title || '',
+          description: String(t.description || '').slice(0, 200),
+          risk: deriveRisk(t, overrides),
+          enabled: !exclude.includes(t.name)
+            && (!include.length || include.includes(t.name)),
+        })),
+      };
+    });
     return { apps, toolCount: this.tools.length, builtAt: this._builtAt };
   }
 }
