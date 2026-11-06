@@ -398,7 +398,7 @@ async function loadProviders() {
           <div class="d">${esc(p.base_url)} · ${esc(p.model)} · ${p.hasKey ? '已设置密钥' : '无密钥'}</div>
         </div>
         <span class="sp"></span>
-        ${p.source === 'config' ? '<span class="badge ghost">配置文件</span>' : `<button class="btn sm ghost" data-del-prov="${esc(p.id)}">删除</button>`}
+        ${p.source === 'config' ? '<span class="badge ghost" title="来自 config.json，要在界面删就先把它从文件里去掉">配置文件</span>' : `<button class="btn sm ghost" data-del-prov="${esc(p.id)}">删除</button>`}
       </div>`).join('') : '<div class="hint">还没有服务商。点右上角「添加服务商」，把厂商给的接口地址和模型名填进去就行——任何 OpenAI 兼容的服务都能用，不限于预设列表。不配也能用：本地别名表已经能覆盖大部分说法。</div>';
 
     $$('[data-del-prov]').forEach((b) => {
