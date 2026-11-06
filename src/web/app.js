@@ -153,7 +153,13 @@ function bindCards() {
 function renderApps() {
   const d = S.data;
   if (!d) return;
-  const cards = d.apps.map(appCard).join('');
+  // 出厂不带任何应用，所以第一次进来大概率是空的——给一句话说清下一步，
+  // 否则页面上只有一个虚线框，容易以为是加载失败。
+  const cards = d.apps.length
+    ? d.apps.map(appCard).join('')
+    : `<div class="empty" style="grid-column:1/-1">
+         还没有接入应用。点下面的卡片加一个——填上它的 MCP 端点地址（形如 <code>http://服务名:端口/mcp</code>）即可。
+       </div>`;
   const add = `<button class="card app-card" id="addCard" style="border-style:dashed; align-items:center; justify-content:center; min-height:132px; color:var(--text-faint)">
      + 添加应用</button>`;
   $('#appGrid').innerHTML = cards + add;

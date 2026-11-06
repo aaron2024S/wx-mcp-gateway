@@ -276,6 +276,17 @@ async function main() {
   ok('列表被列表化', /共 3 条/.test(outbox[0] || ''), outbox[0]);
   ok('条目带发件人与未读标记', /张三/.test(outbox[0] || '') && /未读/.test(outbox[0] || ''), outbox[0]);
 
+  console.log('\n=== ④b 帮助文案按真实工具生成 ===');
+  // 出厂不带应用，接进来的可能是路由器、下载器，帮助里写死「看有哪些邮箱」
+  // 会让人以为功能不存在。例子必须来自当前 tools/list。
+  outbox.length = 0;
+  il.push({ from_user_id: 'wxid_me', context_token: 'CTX-H', msg_id: 'mH', item_list: [{ type: 1, text_item: { text: '/help' } }] });
+  for (let i = 0; i < 40 && !outbox.length; i++) await sleep(100);
+  const help = outbox[0] || '';
+  ok('例子来自真实工具', /列出邮件|搜索邮件|列出邮箱账号/.test(help), help);
+  ok('不再写死邮箱示例', !/看有哪些邮箱/.test(help), help);
+  ok('指令清单一并给出', /\/menu/.test(help) && /\/status/.test(help), help);
+
   console.log('\n=== ⑤ 重投去重 ===');
   outbox.length = 0;
   calls.length = 0;

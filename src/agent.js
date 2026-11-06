@@ -13,18 +13,21 @@ import { isYes, isNo, parseOrdinal } from './session.js';
 const MAX_INPUT = 2000;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const HELP = [
-  '直接说你要做什么就行，比如：',
-  '· 查一下未读',
-  '· 看有哪些邮箱',
-  '· 搜一下发票',
-  '',
+const HELP_TAIL = [
   '其他指令：',
   '/list 看能做哪些事',
   '/menu 列出全部操作',
   '/status 网关状态',
   '/cancel 取消当前操作',
   '/help 这条说明',
+];
+
+// 没有接入任何应用时的统一说法。出厂配置是空的，所以这是很多人的第一屏。
+const NO_APP = [
+  '还没有接入任何应用。',
+  '先在控制台「应用」页添加一个 MCP server，之后就能在这里直接下指令。',
+  '',
+  ...HELP_TAIL,
 ].join('\n');
 
 export class Agent {
@@ -55,9 +58,12 @@ export class Agent {
     // ① 内置指令
     if (raw.startsWith('/')) {
       const cmd = raw.slice(1).split(/\s+/)[0].toLowerCase();
-      if (['help', '帮助', '?', '？'].includes(cmd)) return say(HELP);
+      if (['help', '帮助', '?', '？'].includes(cmd)) return say(this._help());
       if (['list', '命令', '技能'].includes(cmd)) return say(this._list());
-      if (['menu', '菜单'].includes(cmd)) return say(renderMenu(require_all(this.registry)));
+      if (['menu', '菜单'].includes(cmd)) {
+        const all = require_all(this.registry);
+        return say(all.length ? renderMenu(all) : NO_APP);
+      }
       if (['status', '状态'].includes(cmd)) return say(this._status());
       if (['cancel', '取消'].includes(cmd)) {
         this.sessions.clearPending(chatId);
@@ -124,6 +130,25 @@ export class Agent {
   }
 
   // ---- 内部 ---------------------------------------------------------
+
+  // 举例必须用真实工具，不能写死「查一下未读」——出厂不带任何应用，
+  // 接进来的也可能是路由器、下载器，写死邮箱只会让人以为功能不存在。
+  _help() {
+    const tools = this.registry.tools || [];
+    if (!tools.length) return NO_APP;
+
+    // 优先拿只读工具举例：新用户第一次试，最好不要一上来就是高危操作
+    const readOnly = tools.filter((t) => t.risk === 'read');
+    const picks = (readOnly.length ? readOnly : tools).slice(0, 3);
+    const examples = picks.map((t) => `· ${t.title || t.name}`);
+
+    return [
+      '直接说你要做什么就行，比如：',
+      ...examples,
+      '',
+      ...HELP_TAIL,
+    ].join('\n');
+  }
 
   _list() {
     const apps = this.registry.stats().apps;

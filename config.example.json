@@ -46,36 +46,7 @@
       }
     }
   },
-  "apps": [
-    {
-      "id": "mail",
-      "label": "邮箱",
-      "aliases": [
-        "邮件",
-        "信箱"
-      ],
-      "transport": "mcp-http",
-      "url": "http://mailnest:8006/mcp",
-      "auth": {
-        "type": "bearer",
-        "token": ""
-      },
-      "allow_risk": [
-        "read"
-      ],
-      "tools": {
-        "aliases": {
-          "list_messages": [
-            "未读"
-          ]
-        },
-        "risk_overrides": {
-          "delete_messages": "high",
-          "send_message": "high"
-        }
-      }
-    }
-  ],
+  "apps": [],
   "wechat": {
     "base_url": "https://ilinkai.weixin.qq.com"
   }
