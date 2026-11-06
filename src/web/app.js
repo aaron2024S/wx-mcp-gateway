@@ -446,22 +446,22 @@ bindSetting('#setLlmDefault', 'llm_default', (v) => v || '');
 
 // ---- 添加/编辑应用向导 ------------------------------------------------
 
-let WZ = { step: 1, mode: 'http', editId: null, tested: false, tools: [], picked: {} };
+let WZ = { step: 1, editId: null, tested: false, tools: [], picked: {} };
 
 function setStep(n) {
   WZ.step = n;
   $$('.wstep').forEach((s) => s.classList.toggle('on', Number(s.dataset.step) === n));
   $$('[data-bar]').forEach((b) => b.classList.toggle('on', Number(b.dataset.bar) <= n));
   $('#wzPrev').style.display = n === 1 ? 'none' : '';
-  $('#wzNext').textContent = n === 3 ? (WZ.editId ? '保存' : '完成接入') : '下一步';
-  $('#wzTitle').textContent = n === 3 ? '选择启用的工具' : (WZ.editId ? '编辑应用' : '添加应用');
-  $('#wzDesc').textContent = ['选择接入方式', '填写连接信息并测试', '决定放哪些工具给微信'][n - 1];
-  if (n === 2) $('#wzNext').disabled = !WZ.tested;
-  else $('#wzNext').disabled = n === 3 ? !WZ.tools.length : false;
+  $('#wzNext').textContent = n === 2 ? (WZ.editId ? '保存' : '完成接入') : '下一步';
+  $('#wzTitle').textContent = n === 2 ? '选择启用的工具' : (WZ.editId ? '编辑应用' : '添加应用');
+  $('#wzDesc').textContent = ['填写连接信息并测试', '决定放哪些工具给微信'][n - 1];
+  // 第 1 步必须先测通；第 2 步至少有工具可选
+  $('#wzNext').disabled = n === 1 ? !WZ.tested : !WZ.tools.length;
 }
 
 function openWizard(appId) {
-  WZ = { step: 1, mode: 'http', editId: appId, tested: false, tools: [], picked: {} };
+  WZ = { step: 1, editId: appId, tested: false, tools: [], picked: {} };
 
   const app = appId ? S.data.apps.find((a) => a.id === appId) : null;
   $('#wzLabel').value = app?.label || '';
@@ -479,7 +479,7 @@ function openWizard(appId) {
   $('#testBtn').textContent = '测试连接';
   $('#testBtn').disabled = false;
 
-  // 编辑时直接跳到第 2 步：接入方式不用重选
+  // 编辑时直接进表单：地址和端口都是现成的，不用重走一遍
   if (app) {
     WZ.tested = true;
     WZ.tools = S.data.tools.filter((t) => t.appId === appId).map((t) => ({ ...t }));
@@ -487,10 +487,8 @@ function openWizard(appId) {
     const inc = app.tools?.include || [];
     for (const t of WZ.tools) WZ.picked[t.name] = inc.length ? inc.includes(t.name) : true;
     buildTools();
-    setStep(2);
-  } else {
-    setStep(1);
   }
+  setStep(1);
   $('#appModal').classList.remove('hidden');
 }
 
@@ -523,7 +521,7 @@ function buildTools() {
       WZ.picked[n] = !WZ.picked[n];
       row.classList.toggle('off', !WZ.picked[n]);
       row.querySelector('.cb').classList.toggle('on', WZ.picked[n]);
-      setStep(3);
+      setStep(WZ.step);
     };
   });
 }
@@ -531,18 +529,6 @@ function buildTools() {
 $('#addAppBtn').onclick = () => openWizard(null);
 $('#wzCancel').onclick = closeWizard;
 $('#wzPrev').onclick = () => setStep(Math.max(1, WZ.step - 1));
-
-$$('.opt').forEach((o) => {
-  o.onclick = () => {
-    if (o.dataset.mode === 'manifest') {
-      toast('私有 manifest 适配器还没做，先用标准 MCP');
-      return;
-    }
-    $$('.opt').forEach((x) => x.classList.remove('sel'));
-    o.classList.add('sel');
-    WZ.mode = o.dataset.mode;
-  };
-});
 
 function draftApp() {
   const risks = [];
@@ -599,22 +585,15 @@ $('#testBtn').onclick = async () => {
     btn.textContent = '重新测试';
   } finally {
     btn.disabled = false;
-    setStep(2);
+    setStep(WZ.step);   // 只刷新按钮可用状态，别顺带跳步
   }
 };
 
 $('#wzNext').onclick = async () => {
   if (WZ.step === 1) {
-    if (!WZ.editId) {
-      $('#wzId').value = $('#wzId').value || '';
-    }
-    setStep(2);
-    return;
-  }
-  if (WZ.step === 2) {
-    if (!WZ.tested) { toast('先测试连接，通过了才能保存'); return; }
+    if (!WZ.tested) { toast('先点「测试连接」，通过了才能继续'); return; }
     buildTools();
-    setStep(3);
+    setStep(2);
     return;
   }
 

@@ -190,38 +190,14 @@
   <div class="modal-card">
     <div class="modal-head">
       <h2 id="wzTitle">添加应用</h2>
-      <p id="wzDesc">选择接入方式</p>
+      <p id="wzDesc">填写连接信息并测试</p>
       <div style="display:flex; gap:6px; margin-bottom:14px">
         <div data-bar="1" style="flex:1; height:3px; border-radius:2px; background:var(--border)"></div>
         <div data-bar="2" style="flex:1; height:3px; border-radius:2px; background:var(--border)"></div>
-        <div data-bar="3" style="flex:1; height:3px; border-radius:2px; background:var(--border)"></div>
       </div>
     </div>
     <div class="modal-body">
       <div class="wstep on" data-step="1">
-        <div class="opt sel" data-mode="http">
-          <div class="radio-mark"></div>
-          <div>
-            <p class="t">远程 HTTP 端点 <span class="badge ghost">MCP</span></p>
-            <p class="d">应用自己提供 /mcp。跨容器、跨机器都能用，首选。</p>
-          </div>
-        </div>
-        <div class="opt" data-mode="manifest">
-          <div class="radio-mark"></div>
-          <div>
-            <p class="t">私有 manifest <span class="badge no">非 MCP</span></p>
-            <p class="d">应用只加了两个普通接口（/agent/manifest + /agent/exec），由网关做适配。第三方 MCP 客户端连不上它。</p>
-          </div>
-        </div>
-        <div class="test-result" id="manifestNote" style="background:var(--amber-soft); border:1px solid transparent; margin-top:14px">
-          <p class="tr-title" style="color:var(--amber); margin:0">这一版还没实现</p>
-          <div style="color:var(--amber); font-size:11.5px; line-height:1.6">
-            私有 manifest 需要一个额外的适配器，等真有第二个非 MCP 的应用再加。现在先走标准 MCP。
-          </div>
-        </div>
-      </div>
-
-      <div class="wstep" data-step="2">
         <div class="field">
           <label>显示名称</label>
           <input id="wzLabel" placeholder="例如：邮箱">
@@ -239,7 +215,7 @@
         <div class="field">
           <label>端点地址</label>
           <input id="wzUrl" class="mono-input" placeholder="http://mailnest:8006/mcp">
-          <div class="hint">容器之间用服务名，不要写 localhost；端口是容器内端口。</div>
+          <div class="hint">应用自己要提供 HTTP 的 MCP 端点（一般是 /mcp）。容器之间用服务名，不要写 localhost；端口是容器内端口。</div>
         </div>
         <div class="field">
           <label>访问令牌</label>
@@ -259,7 +235,7 @@
         <div class="test-result" id="testResult"></div>
       </div>
 
-      <div class="wstep" data-step="3">
+      <div class="wstep" data-step="2">
         <p style="font-size:12px; color:var(--text-faint); margin:0 0 12px" id="toolHint"></p>
         <div id="toolPick"></div>
       </div>
