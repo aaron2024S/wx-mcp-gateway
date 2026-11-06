@@ -81,10 +81,56 @@ jobs:
       - uses: docker/setup-qemu-action@v4
       - uses: docker/setup-buildx-action@v4
 
+      # 凭据体检 + 去空白。
+      #
+      # 从网页复制 Access Token 时极易带上首尾的换行或空格，而 GitHub 的 secret
+      # 是原样存储的，不会替你 trim。带着空白去登录，Docker 只会回一句
+      # "malformed HTTP Authorization header"，看着像协议错误，实际是脏字符。
+      #
+      # 这里统一 trim 后再交给 login-action，并把「哪些地方不对劲」打印出来。
+      # 只输出长度和特征，不输出值本身。
+      - name: 检查推送凭据
+        env:
+          RAW_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+          RAW_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          U="$(printf '%s' "${RAW_USER:-}" | tr -d '[:space:]')"
+          T="$(printf '%s' "${RAW_TOKEN:-}" | tr -d '[:space:]')"
+          if [ -n "$T" ]; then echo "::add-mask::$T"; fi
+          { echo "DH_USER=$U"; echo "DH_TOKEN=$T"; } >> "$GITHUB_ENV"
+
+          echo "用户名长度 : ${#U}"
+          echo "Token 长度 : ${#T}"
+
+          case "$T" in
+            dckr_pat_*) echo "Token 前缀 : dckr_pat_（Access Token，正确）" ;;
+            '')         echo "Token 前缀 : 空" ;;
+            *)          echo "Token 前缀 : 不是 dckr_pat_，可能填成了登录密码或其他东西" ;;
+          esac
+
+          # 注意：这里必须用 if，不能用 `[ ... ] && echo` ——
+          # 开了 set -e 时条件不成立返回 1，整段脚本会直接退出。
+          if [ "$U" != "${RAW_USER:-}" ]; then
+            echo "::warning::用户名首尾有空白，已自动去掉"
+          fi
+          if [ "$T" != "${RAW_TOKEN:-}" ]; then
+            echo "::warning::Token 首尾有空白，已自动去掉（之前登录失败多半就是这个原因）"
+          fi
+          if printf '%s' "$T" | LC_ALL=C grep -q '[^ -~]'; then
+            echo "::error::Token 里含不可见字符。请删掉这个 secret，回 Docker Hub 重新复制一份，只复制 dckr_pat_ 开头的那串"
+            exit 1
+          fi
+          if [ -z "$T" ]; then
+            echo "::error::DOCKERHUB_TOKEN 是空的。到 Settings → Secrets and variables → Actions 的 Secrets 分页填写"
+            exit 1
+          fi
+          echo "凭据格式正常"
+
       - uses: docker/login-action@v4
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          username: ${{ env.DH_USER }}
+          password: ${{ env.DH_TOKEN }}
 
       - uses: docker/build-push-action@v7
         id: build
