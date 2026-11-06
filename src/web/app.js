@@ -5,7 +5,6 @@ const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
-let TOKEN = localStorage.getItem('gw_token') || '';
 let S = {
   data: null,
   page: location.hash.slice(1) || 'overview',
@@ -19,16 +18,16 @@ let S = {
 async function api(path, opts = {}) {
   const res = await fetch(path, {
     method: opts.method || 'GET',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(TOKEN ? { Authorization: 'Bearer ' + TOKEN } : {}),
-    },
+    headers: { 'Content-Type': 'application/json' },
     body: opts.body ? JSON.stringify(opts.body) : undefined,
   });
 
+  // 会话过期（或密码被改过）时服务端一律 401，直接甩回登录页。
+  // 不在这里弹"请重新登录"的框：密码改过之后任何操作都必然 401，
+  // 让用户对着一个只能点确定的弹窗，不如把页面换成登录页。
   if (res.status === 401) {
-    $('#tokenModal').classList.remove('hidden');
-    throw new Error('需要访问令牌');
+    location.replace('/login');
+    throw new Error('登录已失效');
   }
   let data = null;
   try { data = await res.json(); } catch { /* 空响应 */ }
@@ -54,6 +53,7 @@ applyTheme(localStorage.getItem('gw_theme') || 'dark');
 $('#themeBtn').onclick = () => {
   applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark');
 };
+$('#logoutBtn').onclick = doLogout;
 
 // ---- 导航 -------------------------------------------------------------
 
@@ -761,13 +761,62 @@ $('#runGo').onclick = async () => {
   }
 };
 
-// ---- 令牌 -------------------------------------------------------------
+// ---- 退出登录 ---------------------------------------------------------
 
-$('#tkGo').onclick = () => {
-  TOKEN = $('#tkInput').value.trim();
-  localStorage.setItem('gw_token', TOKEN);
-  $('#tokenModal').classList.add('hidden');
-  refreshAll();
+async function doLogout() {
+  try {
+    await fetch('/api/auth/logout', { method: 'POST' });
+  } catch { /* 网络断了也要把界面送走，否则用户以为没登出 */ }
+  location.replace('/login');
+}
+
+$('#logoutBtn2').onclick = doLogout;
+
+// ---- 修改密码 ---------------------------------------------------------
+
+function setCpHint(msg, bad) {
+  const el = $('#cpHint');
+  el.textContent = msg || '';
+  el.style.color = bad ? 'var(--red)' : 'var(--text-faint)';
+}
+
+$('#chpwBtn').onclick = () => {
+  $('#cpOld').value = '';
+  $('#cpNew').value = '';
+  $('#cpNew2').value = '';
+  $('#cpGo').disabled = false;
+  $('#cpGo').textContent = '确定';
+  setCpHint('');
+  $('#chpwModal').classList.remove('hidden');
+  setTimeout(() => $('#cpOld').focus(), 0);
+};
+
+$('#cpCancel').onclick = () => $('#chpwModal').classList.add('hidden');
+
+// 本地先挡一道，省一次往返；服务端仍会独立校验（前端校验永远不算数）
+$('#cpGo').onclick = async () => {
+  const oldPw = $('#cpOld').value;
+  const np = $('#cpNew').value;
+  const np2 = $('#cpNew2').value;
+  if (!oldPw) return setCpHint('请输入原密码', true);
+  if (np.length < 8) return setCpHint('新密码至少 8 位', true);
+  if (/^\d+$/.test(np)) return setCpHint('新密码不能全是数字，请混入字母或符号', true);
+  if (np !== np2) return setCpHint('两次输入的新密码不一致', true);
+  if (np === oldPw) return setCpHint('新密码和原密码一样，换一个', true);
+
+  const btn = $('#cpGo');
+  btn.disabled = true;
+  btn.textContent = '处理中…';
+  try {
+    await api('/api/auth/password', { method: 'POST', body: { oldPassword: oldPw, newPassword: np, confirm: np2 } });
+    $('#chpwModal').classList.add('hidden');
+    toast('密码已修改，请用新密码重新登录');
+    setTimeout(() => location.replace('/login'), 900);
+  } catch (e) {
+    setCpHint(e.message, true);
+    btn.disabled = false;
+    btn.textContent = '确定';
+  }
 };
 
 // ---- 主循环 -----------------------------------------------------------
@@ -819,15 +868,6 @@ function schedule() {
 }
 
 (async () => {
-  // 先问要不要令牌，避免每次都吃一个 401
-  try {
-    const a = await fetch('/api/auth').then((r) => r.json());
-    if (a.required && !a.ok) {
-      $('#tokenModal').classList.remove('hidden');
-      return;
-    }
-  } catch { /* 服务没起来也照样往下走，会显示空数据 */ }
-
   go(S.page);
   await refreshAll();
   schedule();

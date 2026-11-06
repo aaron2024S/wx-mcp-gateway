@@ -13,17 +13,18 @@ COPY config.example.json ./
 ENV NODE_ENV=production \
     GATEWAY_DATA=/data \
     GATEWAY_CONFIG=/data/config.json \
-    PORT=8787
+    PORT=7337
 
 # 配置和凭据都在这个卷里：删容器不丢绑定，备份就是拷这一个目录
 RUN mkdir -p /data
 VOLUME ["/data"]
 
-EXPOSE 8787
+EXPOSE 7337
 
 # 用 node 自己发请求，镜像里没有 curl/wget
+# 端口读 PORT 变量：compose 里改了 PORT 之后健康检查才会跟着改，写死会一直红
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||8787)+'/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||7337)+'/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
 # 用非 root 跑：这个进程会长期挂着处理外部消息，权限越小越好
 RUN chown -R node:node /app /data

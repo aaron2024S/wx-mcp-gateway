@@ -26,7 +26,7 @@ export const DEFAULT_BASE = 'https://ilinkai.weixin.qq.com';
 // 这两个常量社区各版本不一致（有写 "1"、有写 base64），这里跟官方随 OpenClaw 放出的值走。
 const CLIENT_VERSION = '65547';
 const CHANNEL_VERSION = '2.4.9';
-const BOT_AGENT = 'wx-mcp-gateway/0.2.1';
+const BOT_AGENT = 'wx-mcp-gateway/0.3.0';
 
 const QR_TTL_MS = 5 * 60 * 1000;
 const QR_POLL_MS = 3000;

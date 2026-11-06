@@ -47,8 +47,12 @@
       <span class="lbl">主题</span>
       <button class="btn sm ghost" id="themeBtn">切换</button>
     </div>
+    <div class="row">
+      <span class="lbl">账户</span>
+      <button class="btn sm ghost" id="logoutBtn">退出登录</button>
+    </div>
     <div class="row" style="margin-bottom:0">
-      <span class="lbl" id="verLabel">v0.2.0</span>
+      <span class="lbl" id="verLabel">v0.3.0</span>
       <span class="lbl" id="upLabel"></span>
     </div>
   </div>
@@ -166,6 +170,17 @@
         <select id="setLlmDefault"></select>
       </div>
       <div id="provList" style="margin-top:6px"></div>
+    </div>
+    <div class="section-title">安全<span class="line"></span></div>
+    <div class="card">
+      <div class="set-row">
+        <div class="grow"><div style="font-size:13px">访问密码</div><div class="hint">首次打开时设置的那个；改完所有设备都要重新登录</div></div>
+        <button class="btn" id="chpwBtn">修改</button>
+      </div>
+      <div class="set-row" style="margin-bottom:0">
+        <div class="grow"><div style="font-size:13px">当前登录</div><div class="hint">退出后需要重新输入密码</div></div>
+        <button class="btn ghost" id="logoutBtn2">退出登录</button>
+      </div>
     </div>
   </section>
 </main>
@@ -320,19 +335,23 @@
   </div>
 </div>
 
-<!-- 访问令牌 -->
-<div class="modal hidden" id="tokenModal">
-  <div class="modal-card" style="width:420px">
+<!-- 修改密码 -->
+<div class="modal hidden" id="chpwModal">
+  <div class="modal-card" style="width:430px">
     <div class="modal-head">
-      <h2>需要访问令牌</h2>
-      <p>这个网关设置了访问保护</p>
+      <h2>修改访问密码</h2>
+      <p>改完所有设备（包括这台）都要重新登录</p>
     </div>
     <div class="modal-body">
-      <div class="field"><label>令牌</label><input id="tkInput" type="password" placeholder="GATEWAY_WEB_TOKEN"></div>
+      <div class="field"><label>原密码</label><input id="cpOld" type="password" autocomplete="current-password"></div>
+      <div class="field"><label>新密码</label><input id="cpNew" type="password" autocomplete="new-password" placeholder="至少 8 位，别用纯数字"></div>
+      <div class="field"><label>确认新密码</label><input id="cpNew2" type="password" autocomplete="new-password"></div>
+      <div class="hint" id="cpHint" style="min-height:16px"></div>
     </div>
     <div class="modal-foot">
       <div style="flex:1"></div>
-      <button class="btn primary" id="tkGo">进入</button>
+      <button class="btn ghost" id="cpCancel">取消</button>
+      <button class="btn primary" id="cpGo">确定</button>
     </div>
   </div>
 </div>

@@ -242,6 +242,10 @@ async function main() {
   ok('bot_id 已记录', wechat.state.botId === 'bot_42');
   ok('token 已保存到磁盘', JSON.parse(fs.readFileSync(path.join(dataDir, 'weixin.json'), 'utf8')).token === 'BOT-TOKEN-1');
 
+  // 「已上线」在 start() 里是同步置位的，但长轮询的第一轮 getupdates 是异步发的。
+  // 不等这一发就先断言请求头，会偶发地 8 条一起红（机器慢或 CI 上更容易踩）。
+  for (let i = 0; i < 50 && !il.seen.headers.some((x) => x.path === '/ilink/bot/getupdates'); i++) await sleep(100);
+
   const h = il.seen.headers.find((x) => x.path === '/ilink/bot/getupdates');
   ok('请求头 AuthorizationType', h?.authorizationtype === 'ilink_bot_token');
   ok('请求头 iLink-App-Id', h?.['ilink-app-id'] === 'bot');

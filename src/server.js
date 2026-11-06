@@ -20,21 +20,25 @@ import { Agent } from './agent.js';
 import { IlinkClient, DEFAULT_BASE } from './ilink.js';
 import { checkRisk, runTool, renderResult, riskLabel } from './exec.js';
 import { routeWithLLM } from './llm.js';
+import {
+  Auth, AuthError, COOKIE_NAME, MIN_PASSWORD,
+  MAX_FAILURES, TTL_KEEP_MS, lockedHint,
+} from './auth.js';
 
-const VERSION = '0.2.1';
+const VERSION = '0.3.0';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const WEB_DIR = path.join(HERE, 'web');
 
 const DATA_DIR = path.resolve(process.env.GATEWAY_DATA || 'data');
-const PORT = Number(process.env.PORT || 8787);
+const PORT = Number(process.env.PORT || 7337);
 const HOST = process.env.HOST || '0.0.0.0';
-const WEB_TOKEN = process.env.GATEWAY_WEB_TOKEN || '';
 
 ensureDir(DATA_DIR);
 const log = new Log({
   level: process.env.LOG_LEVEL || 'info',
   file: path.join(DATA_DIR, 'gateway.log'),
 });
+const auth = new Auth({ dataDir: DATA_DIR, log });
 const CALLS_FILE = path.join(DATA_DIR, 'calls.jsonl');
 const startedAt = Date.now();
 
@@ -182,12 +186,73 @@ function readBody(req, limit = 1024 * 1024) {
   });
 }
 
-function authorized(req) {
-  if (!WEB_TOKEN) return true;
-  const h = req.headers.authorization || '';
-  if (h === `Bearer ${WEB_TOKEN}`) return true;
-  const cookie = req.headers.cookie || '';
-  return cookie.split(/;\s*/).some((c) => c === `gw_token=${WEB_TOKEN}`);
+// ---- 会话 / 客户端识别 -------------------------------------------------
+
+function getCookie(req, name) {
+  const raw = req.headers.cookie || '';
+  for (const part of raw.split(';')) {
+    const eq = part.indexOf('=');
+    if (eq < 0) continue;
+    if (part.slice(0, eq).trim() === name) return part.slice(eq + 1).trim();
+  }
+  return '';
+}
+
+/** 是不是内网/本机地址（含 IPv4-mapped IPv6 写法）。 */
+function isPrivateIP(addr) {
+  const a = String(addr || '').replace(/^::ffff:/i, '');
+  if (!a) return false;
+  if (a === '::1' || a === '127.0.0.1') return true;
+  if (/^127\./.test(a)) return true;
+  if (/^10\./.test(a)) return true;
+  if (/^192\.168\./.test(a)) return true;
+  if (/^172\.(1[6-9]|2\d|3[01])\./.test(a)) return true;
+  return false;
+}
+
+/**
+ * 取客户端 IP，用于失败计数与锁定。
+ *
+ * 只有「直连方本身是内网/本机」时才采信 X-Forwarded-For —— 容器部署常在前面挂
+ * NAS 的反向代理，那种情况下 socket 是 172.x 的网桥地址、真实来源只在 XFF 里。
+ * 但如果无条件相信 XFF，攻击者每次换一个假值就能把锁定绕过去。
+ */
+function clientIP(req) {
+  const sock = req.socket.remoteAddress || '';
+  if (isPrivateIP(sock)) {
+    const first = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+    if (first) return first;
+  }
+  return sock;
+}
+
+function sessionCookie(token, keep, secure) {
+  const bits = [`${COOKIE_NAME}=${token}`, 'Path=/', 'HttpOnly', 'SameSite=Lax'];
+  // 局域网 HTTP 部署下如果强加 Secure，浏览器不会回传 Cookie，等于永远登不进去。
+  // 只有明确走 HTTPS（反向代理声明）时才加。
+  if (secure) bits.push('Secure');
+  if (keep) bits.push(`Max-Age=${Math.floor(TTL_KEEP_MS / 1000)}`);
+  return bits.join('; ');
+}
+
+/** 当前请求携带的有效会话 token；没登录返回空串。 */
+function currentSession(req) {
+  const token = getCookie(req, COOKIE_NAME);
+  return auth.validate(token) ? token : '';
+}
+
+function authState(req) {
+  const ip = clientIP(req);
+  const left = auth.lockedFor(ip);
+  return {
+    initialized: auth.initialized,
+    loggedIn: Boolean(currentSession(req)),
+    failures: auth.failuresFor(ip),
+    maxFailures: MAX_FAILURES,
+    lockedFor: left > 0 ? Math.ceil(left / 1000) : 0,
+    lockedHint: left > 0 ? lockedHint(left) : '',
+    minPassword: MIN_PASSWORD,
+  };
 }
 
 const MIME = {
@@ -408,11 +473,33 @@ const ROUTES = [
     return { ok: true, chatId };
   }],
 
-  ['GET', /^\/api\/health$/, () => ({ ok: true, version: VERSION })],
+  // /api/health 不在这张表里：它在 createServer 开头就返回了（要在登录校验之前）
 ];
 
 class HttpError extends Error {
   constructor(status, message) { super(message); this.status = status; }
+}
+
+/** 只在内网直连/反代声明时才认为走的是 HTTPS。 */
+function isHttps(req) {
+  return String(req.headers['x-forwarded-proto'] || '').toLowerCase() === 'https';
+}
+
+/** 认证类错误统一出口：锁定给 429 + 剩余秒数，密码错给 401，参数问题给 400。 */
+function failAuth(res, e) {
+  if (!(e instanceof AuthError)) {
+    log.error('auth', errText(e));
+    sendJson(res, 500, { error: '服务端出错了，请稍后再试' });
+    return;
+  }
+  if (e.code === 'locked') {
+    // retryAfter 让前端能起倒计时，而不是"再点一次才知道还被锁着"
+    const left = e.retryAfter || 0;
+    sendJson(res, 429, { error: e.message, code: 'locked', retryAfter: left });
+    return;
+  }
+  const status = e.code === 'bad_password' ? 401 : e.code === 'already_initialized' ? 409 : 400;
+  sendJson(res, status, { error: e.message, code: e.code });
 }
 
 const server = http.createServer(async (req, res) => {
@@ -422,19 +509,102 @@ const server = http.createServer(async (req, res) => {
 
   const p = url.pathname;
 
+  // ---- 静态页面 ----
   if (!p.startsWith('/api/')) {
+    if (p === '/login' || p === '/login.html') {
+      if (currentSession(req)) { res.writeHead(302, { Location: '/' }).end(); return; }
+      serveStatic(res, '/login.html');
+      return;
+    }
+    // 未登录统一甩到登录页。用 302 而不是直接吐登录页内容：地址栏能看出
+    // "我是被踢出来的"，登录完再回跳也不会莫名其妙停在一个陌生 URL 上。
+    if (!currentSession(req)) {
+      res.writeHead(302, { Location: '/login' }).end();
+      return;
+    }
     serveStatic(res, p);
     return;
   }
 
-  // 这个接口必须在鉴权之前处理：前端正是靠它判断"要不要先输入令牌"
-  if (p === '/api/auth') {
-    sendJson(res, 200, { required: !!WEB_TOKEN, ok: authorized(req) });
+  // ---- 认证接口：必须在登录校验之前，否则没人能登进来 ----
+  // 健康检查也在这里：容器的 HEALTHCHECK 用它，而容器里没有会话；
+  // 放到后面会让容器永远 unhealthy。
+  if (p === '/api/health') {
+    sendJson(res, 200, { ok: true, version: VERSION });
     return;
   }
 
-  if (!authorized(req)) {
-    sendJson(res, 401, { error: '需要访问令牌', needToken: true });
+  if (p === '/api/auth/session') {
+    sendJson(res, 200, authState(req));
+    return;
+  }
+
+  if (p === '/api/auth/setup' && req.method === 'POST') {
+    const ip = clientIP(req);
+    const left = auth.lockedFor(ip);
+    if (left > 0) {
+      sendJson(res, 429, { error: lockedHint(left), code: 'locked', retryAfter: Math.ceil(left / 1000) });
+      return;
+    }
+    const body = await readBody(req).catch(() => ({}));
+    try {
+      const r = await auth.setup(String(body.password ?? ''), String(body.confirm ?? ''), ip, req.headers['user-agent'] || '');
+      // 首启自动登录下发**会话 Cookie**（不带 Max-Age）：关掉浏览器就失效，
+      // 不悄悄留下一个 7 天的持久登录。
+      res.setHeader('Set-Cookie', sessionCookie(r.token, false, isHttps(req)));
+      sendJson(res, 200, { ok: true, autoLogin: true });
+    } catch (e) {
+      failAuth(res, e);
+    }
+    return;
+  }
+
+  if (p === '/api/auth/login' && req.method === 'POST') {
+    const ip = clientIP(req);
+    const body = await readBody(req).catch(() => ({}));
+    try {
+      const r = await auth.login(String(body.password ?? ''), ip, req.headers['user-agent'] || '', body.keep === true);
+      res.setHeader('Set-Cookie', sessionCookie(r.token, r.keep, isHttps(req)));
+      sendJson(res, 200, { ok: true, expiresIn: Math.floor(r.ttl / 1000) });
+    } catch (e) {
+      const left = auth.lockedFor(ip);
+      if (e instanceof AuthError && e.code === 'locked') e.retryAfter = Math.ceil(left / 1000);
+      failAuth(res, e);
+    }
+    return;
+  }
+
+  if (p === '/api/auth/logout' && req.method === 'POST') {
+    auth.logout(getCookie(req, COOKIE_NAME));
+    res.setHeader('Set-Cookie', `${COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+
+  if (p === '/api/auth/password' && req.method === 'POST') {
+    if (!currentSession(req)) { sendJson(res, 401, { error: '请先登录', needLogin: true }); return; }
+    const body = await readBody(req).catch(() => ({}));
+    try {
+      await auth.changePassword(String(body.oldPassword ?? ''), String(body.newPassword ?? ''), String(body.confirm ?? ''));
+      // 改密后所有会话作废，当前这个也不例外——清掉 Cookie 让前端回登录页
+      res.setHeader('Set-Cookie', `${COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
+      sendJson(res, 200, { ok: true, relogin: true });
+    } catch (e) {
+      // 这里不能用 failAuth：它把「密码错」映射成 401，而前端把 401 一律当作
+      // 会话失效直接跳登录页。用户只是打错了原密码，不该被踢出去。
+      if (e instanceof AuthError) {
+        sendJson(res, 400, { error: e.message, code: e.code });
+      } else {
+        log.error('auth', errText(e));
+        sendJson(res, 500, { error: '服务端出错了，请稍后再试' });
+      }
+    }
+    return;
+  }
+
+  // ---- 其余接口一律要求登录 ----
+  if (!currentSession(req)) {
+    sendJson(res, 401, { error: '请先登录', needLogin: true });
     return;
   }
 
@@ -469,6 +639,9 @@ async function main() {
 
   server.listen(PORT, HOST, () => {
     log.info('server', `控制台 http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}  （v${VERSION}）`);
+    if (!auth.initialized) {
+      log.warn('server', '还没设置访问密码：打开控制台会先要求设一个，之后用它登录');
+    }
   });
 }
 

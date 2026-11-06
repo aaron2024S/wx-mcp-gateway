@@ -1,6 +1,6 @@
 {
   "name": "wx-mcp-gateway",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "description": "微信 ⇄ MCP 网关：用微信控制任意 MCP server，零第三方依赖",
@@ -9,6 +9,7 @@
   "scripts": {
     "start": "node src/server.js",
     "test": "node scripts/e2e.js",
+    "test:auth": "node scripts/test-auth.js",
     "test:llm": "node scripts/test-llm.js",
     "demo": "node scripts/demo.js",
     "mock:mcp": "node scripts/mock-mcp.js",

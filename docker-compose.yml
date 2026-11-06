@@ -2,9 +2,11 @@
 #
 # 部署要点只有两条：
 #   ① 必须和「要被控制的应用」在同一个 docker network 里，否则解析不到服务名；
-#   ② 只暴露控制台的 8787，不需要任何入站端口给微信——链路是纯出站的。
+#   ② 只暴露控制台的 7337，不需要任何入站端口给微信——链路是纯出站的。
 #
 # 微信号不需要公网 IP、不需要端口映射、不需要 DDNS。
+#
+# 首次打开 http://<NAS的IP>:7337 会让你设置一个访问密码，之后用它登录。
 
 services:
   wx-mcp-gateway:
@@ -12,26 +14,28 @@ services:
     # 和 CI 推送到 Docker Hub 的名字保持一致：本地 `docker compose build`
     # 出来的镜像可以直接 `docker push`，不用再 tag 一次。
     # 用现成镜像时把 build 那行删掉即可。
-    image: aaron2024s/wx-mcp-gateway:0.2.1
+    image: aaron2024s/wx-mcp-gateway:0.3.0
     container_name: wx-mcp-gateway
     restart: unless-stopped
 
     ports:
-      # 只给局域网看控制台。不想暴露就删掉这段，用 NAS 的反代或 SSH 隧道访问。
-      - "8787:8787"
+      # 冒号右边是容器内端口，必须和下面 environment 里的 PORT 一致。
+      # 想换端口：两处一起改；或者只在本目录建个 .env 写 PORT=8123，
+      # 然后把这两行都写成 ${PORT:-7337}，改一处就够。
+      - "7337:7337"
 
     volumes:
-      # 这一个目录装了全部状态：config.json、微信绑定、调用日志、AI 密钥
+      # 这一个目录装了全部状态：config.json、登录密码、微信绑定、调用日志、AI 密钥
       - ./data:/data
 
     environment:
-      TZ: Asia/Shanghai
-      GATEWAY_DATA: /data
-      GATEWAY_CONFIG: /data/config.json
-      # 可选：给控制台加一道门。设了就要求输入这个令牌。
-      # GATEWAY_WEB_TOKEN: ${GATEWAY_WEB_TOKEN}
+      - TZ=Asia/Shanghai
+      # 容器内监听端口。改这里的话，上面 ports 的右边也要一起改。
+      - PORT=7337
+      - GATEWAY_DATA=/data
+      - GATEWAY_CONFIG=/data/config.json
       # 应用凭据走环境变量，不要写进 config.json（那个文件要能进 git）
-      MAILNEST_TOKEN: ${MAILNEST_TOKEN:-}
+      - MAILNEST_TOKEN=${MAILNEST_TOKEN:-}
 
     networks:
       - nas

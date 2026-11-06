@@ -29,13 +29,16 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # 出镜像之前先跑一遍端到端测试：起假 iLink 网关 + 假 MCP server，
-      # 41 项断言覆盖扫码→收消息→匹配→执行→二次确认→解绑重扫。
+      # 出镜像之前先跑一遍测试：
+      #   e2e    —— 假 iLink 网关 + 假 MCP server，41 项；
+      #   auth   —— 起真服务走完设密码→登录→改密→锁定，49 项；
+      #   llm    —— 假 OpenAI/Anthropic 端点，22 项。
       # 这一步能挡住"字段名写错一个字母"这类只在真机上才暴露的问题。
-      - name: 跑端到端测试
+      - name: 跑测试
         run: |
           node --version
           npm test
+          npm run test:auth
           npm run test:llm
 
       - name: 计算镜像标签

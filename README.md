@@ -32,7 +32,11 @@
 
 ## 界面
 
-控制台是零构建的单页，五个页面：概览、应用、工具、调用日志、设置。
+第一次打开是设置密码，之后是登录：
+
+![登录](docs/07-login.png)
+
+进去以后是零构建的单页控制台，五个页面：概览、应用、工具、调用日志、设置。
 
 ![概览](docs/01-overview.png)
 
@@ -53,7 +57,8 @@ mkdir -p /volume1/docker/wx-mcp-gateway/data
 cd /volume1/docker/wx-mcp-gateway
 
 docker run -d --name wx-mcp-gateway \
-  -p 8787:8787 \
+  -p 7337:7337 \
+  -e PORT=7337 \
   -v "$PWD/data:/data" \
   -e TZ=Asia/Shanghai \
   --restart unless-stopped \
@@ -74,7 +79,32 @@ cp config.example.json data/config.json
 docker compose up -d --build
 ```
 
-打开 `http://<NAS的IP>:8787`：
+### 换端口
+
+默认 `7337`。`-p` 的左右两边、`PORT` 环境变量三处是同一个值，改的时候要一起改：
+
+```yaml
+ports:
+  - "8123:8123"      # 左边是宿主机端口，可以任意；右边必须等于 PORT
+environment:
+  - PORT=8123        # 容器内监听端口
+```
+
+嫌改两处麻烦，就在 compose 同目录建个 `.env` 写 `PORT=8123`，然后把 compose 里那两行换成
+`"${PORT:-7337}:${PORT:-7337}"` 和 `- PORT=${PORT:-7337}`，以后只改 `.env`。
+
+### 第一次打开
+
+打开 `http://<NAS的IP>:7337`，会先让你**设置一个访问密码**（至少 8 位，不能纯数字）。
+设完自动进入，之后每次打开用它登录。
+
+为什么强制设：这个进程手里是 `data/` 的全部内容——微信 `bot_token`、各应用访问令牌、AI 的 API key。
+不设密码等于把"用你的微信驱动你的 NAS"交给同网段的任何人。
+
+> 忘了密码只能重置：删掉 `data/auth.json` 重启容器，会回到设置密码那一步。
+> 网关不存明文、也不联网，所以没有"找回"这条路。
+
+进去之后：
 
 1. **设置 → 微信通道 → 生成二维码**，用手机微信扫
 2. 扫完在微信里给那个新出现的机器人发一句：`/status`
@@ -245,13 +275,13 @@ Node ≥ 20。
 | 风险等级 | 应用声明的 `annotations` 只作默认值，`allow_risk` 是硬上限 |
 | 二次确认 | 高危操作必须回「确认」，窗口 TTL 到点作废 |
 | 凭据 | `data/secrets.json`（0600），API 永不回传原值，界面只显示"已设置" |
-| 前端 | 配置了 `GATEWAY_WEB_TOKEN` 才要令牌；不配则只能在信任的网络里用 |
+| 控制台 | 首启强制设置访问密码，`scrypt` 哈希落盘，HttpOnly 会话，连错 5 次锁定 5 分钟 |
 | 容器 | 非 root 运行 |
 
 三条要自己守的：
 
 1. **`data/` 目录就是全部机密**（微信 token、应用令牌、AI key）。备份它等于备份全部权限，别扔进公开网盘。
-2. **不要把这个端口暴露到公网。** 它没有用户体系，只有一道可选令牌。
+2. **不要把这个端口暴露到公网。** 虽然有一道密码，但它是给局域网用的单用户面板，没有账号体系、没有二级验证、也没有审计日志导出。
 3. **微信只能是第二遥控器。** 这条通道是逆向实现，协议随时可能变。关键链路（定时同步、白名单自愈）必须还在 Web 控制台独立跑。
 
 ---
@@ -276,7 +306,8 @@ Node ≥ 20。
 ## 开发与测试
 
 ```bash
-npm test          # 端到端：假 iLink 网关 + 假 MCP，34 项断言
+npm test          # 端到端：假 iLink 网关 + 假 MCP，41 项断言
+npm run test:auth # 登录：起真服务走完设密码→登录→改密→锁定，49 项断言
 npm run test:llm  # AI 路由层：假 OpenAI/Anthropic 端点，22 项断言
 npm run demo      # 拉起真的 MailNest 跑一遍中文匹配
 ```
@@ -298,6 +329,7 @@ GATEWAY_CONFIG=./config.example.json GATEWAY_DATA=./.tmp-run \
 ```
 src/
   server.js     常驻服务：HTTP 控制台 API + 微信循环 + 应用定时刷新
+  auth.js       访问密码：scrypt 哈希、会话 Cookie、失败锁定
   ilink.js      微信 iLink 协议：扫码、长轮询、发消息、-14 失效
   mcp.js        MCP 客户端：Streamable HTTP + JSON-RPC，7 类错误分类
   registry.js   工具索引：从 tools/list 现场派生，中文匹配用 idf 加权
@@ -307,7 +339,7 @@ src/
   session.js    会话状态：确认、候选、补参、序号引用
   appstore.js   配置合并：手写配置 / 界面改动 / 密钥 三层分离
   llm.js        多 provider AI 路由
-  web/          单页控制台，零构建
+  web/          单页控制台 + 登录页，零构建
 vendor/
   qrcode.cjs    QR 编码（MIT, kazuhikoarase）
 ```
@@ -325,6 +357,10 @@ vendor/
 **微信是纯文本管道。** 图片、语音、文件会被降级成 `[图片]` 这类占位符。要传大文件的场景不适合。
 
 **没有用户体系。** 它假设"这个机器人只有一个人用"。想给家人用，得各自扫码绑各自的机器人。
+
+**首次设密码有一个窗口期。** 从容器起来到你设完密码之间，任何能访问到这个端口的人都可以抢先设一个。
+彻底堵住要么让首启只允许本机访问、要么在日志里打一次性口令，两种做法都会把"打开就能用"这个体验做坏。
+现在的缓解是限流 + 记录：设置密码时会写一条带来源 IP 的日志，事后能看出是谁设的。所以装完先把密码设了。
 
 ---
 
