@@ -399,7 +399,7 @@ async function loadProviders() {
         </div>
         <span class="sp"></span>
         ${p.source === 'config' ? '<span class="badge ghost">配置文件</span>' : `<button class="btn sm ghost" data-del-prov="${esc(p.id)}">删除</button>`}
-      </div>`).join('') : '<div class="hint">还没有服务商。没有也能用——本地别名表就能覆盖大部分说法。</div>';
+      </div>`).join('') : '<div class="hint">还没有服务商。点右上角「添加服务商」，把厂商给的接口地址和模型名填进去就行——任何 OpenAI 兼容的服务都能用，不限于预设列表。不配也能用：本地别名表已经能覆盖大部分说法。</div>';
 
     $$('[data-del-prov]').forEach((b) => {
       b.onclick = async (e) => {
@@ -414,7 +414,7 @@ async function loadProviders() {
 }
 
 // 设置项改动即保存（不用"保存"按钮，少一次点击也少一次忘点）
-function bindSetting(id, key, transform = (v) => v) {
+function bindSetting(id, key, transform = (v) => v, after) {
   const el = $(id);
   if (!el) return;
   el.onchange = async () => {
@@ -424,6 +424,7 @@ function bindSetting(id, key, transform = (v) => v) {
       toast('已保存');
       const r = await api('/api/settings');
       S.data.settings = r.settings;
+      if (after) after(raw);
     } catch (e) { toast(e.message); }
   };
 }
@@ -433,7 +434,12 @@ bindSetting('#setCallTimeout', 'call_timeout', Number);
 bindSetting('#setAsyncAfter', 'async_after', Number);
 bindSetting('#setLogKeep', 'log_keep', Number);
 bindSetting('#setDefaultApp', 'default_app', (v) => v || null);
-bindSetting('#setLlmEnabled', 'llm_enabled', (v) => v === true);
+bindSetting('#setLlmEnabled', 'llm_enabled', (v) => v === true, (on) => {
+  // 出厂不带任何服务商，开关能点亮但后端不会真的启用——这里明说，免得以为坏了
+  if (on && !$$('#provList .tool-line').length) {
+    toast('还没有服务商，AI 兜底不会真正生效：先点「添加服务商」');
+  }
+});
 bindSetting('#setLlmWhen', 'llm_when');
 bindSetting('#setConfirmRisk', 'confirm_risk', (v) => (v ? v.split(',') : []));
 bindSetting('#setLlmDefault', 'llm_default', (v) => v || '');
@@ -644,12 +650,17 @@ async function editApp(id) {
 
 // ---- AI 服务商 --------------------------------------------------------
 
+// 预设只是"填好地址和模型名"的快捷方式，不在表里的厂商选自定义即可。
+// 后端只认两种协议：openai（/chat/completions）与 anthropic（/v1/messages）。
 const PRESETS = {
   deepseek: { type: 'openai', base_url: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
   openai: { type: 'openai', base_url: 'https://api.openai.com/v1', model: 'gpt-4o-mini' },
   moonshot: { type: 'openai', base_url: 'https://api.moonshot.cn/v1', model: 'moonshot-v1-8k' },
   dashscope: { type: 'openai', base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus' },
   zhipu: { type: 'openai', base_url: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4-flash' },
+  siliconflow: { type: 'openai', base_url: 'https://api.siliconflow.cn/v1', model: 'Qwen/Qwen2.5-7B-Instruct' },
+  openrouter: { type: 'openai', base_url: 'https://openrouter.ai/api/v1', model: 'openai/gpt-4o-mini' },
+  groq: { type: 'openai', base_url: 'https://api.groq.com/openai/v1', model: 'llama-3.3-70b-versatile' },
   ollama: { type: 'openai', base_url: 'http://192.168.1.10:11434/v1', model: 'qwen2.5:7b' },
   anthropic: { type: 'anthropic', base_url: 'https://api.anthropic.com', model: 'claude-sonnet-4-5' },
 };

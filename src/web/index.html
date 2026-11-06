@@ -278,26 +278,30 @@
   <div class="modal-card" style="width:520px">
     <div class="modal-head">
       <h2>添加 AI 服务商</h2>
-      <p>任何兼容 OpenAI 接口的服务都能用</p>
+      <p>只要兼容 OpenAI 的 /chat/completions 就能用，不限于下面这些预设</p>
     </div>
     <div class="modal-body">
       <div class="field">
-        <label>预设</label>
+        <label>预设（可选）</label>
         <select id="pvPreset">
-          <option value="">自定义</option>
+          <option value="">自定义（任意 OpenAI 兼容端点）</option>
           <option value="deepseek">DeepSeek</option>
           <option value="openai">OpenAI</option>
           <option value="moonshot">Moonshot / Kimi</option>
           <option value="dashscope">通义千问（DashScope）</option>
           <option value="zhipu">智谱 GLM</option>
+          <option value="siliconflow">硅基流动 SiliconFlow</option>
+          <option value="openrouter">OpenRouter</option>
+          <option value="groq">Groq</option>
           <option value="ollama">本地 Ollama</option>
           <option value="anthropic">Claude（Anthropic 协议）</option>
         </select>
+        <div class="hint">预设只是帮你把地址和模型名填好，选完还能改；榜单上没有的厂商选「自定义」，填它文档里给的地址就行。</div>
       </div>
-      <div class="field"><label>标识</label><input id="pvId" class="mono-input" placeholder="deepseek"></div>
+      <div class="field"><label>标识</label><input id="pvId" class="mono-input" placeholder="my-llm"></div>
       <div class="field"><label>协议</label><select id="pvType"><option value="openai">OpenAI 兼容</option><option value="anthropic">Anthropic</option></select></div>
-      <div class="field"><label>接口地址</label><input id="pvBase" class="mono-input" placeholder="https://api.deepseek.com/v1"></div>
-      <div class="field"><label>模型</label><input id="pvModel" class="mono-input" placeholder="deepseek-chat"></div>
+      <div class="field"><label>接口地址</label><input id="pvBase" class="mono-input" placeholder="https://api.example.com/v1"></div>
+      <div class="field"><label>模型</label><input id="pvModel" class="mono-input" placeholder="厂商文档里的模型名"></div>
       <div class="field">
         <label>API Key</label>
         <input id="pvKey" type="password" placeholder="留空表示不需要（如本地 Ollama）">

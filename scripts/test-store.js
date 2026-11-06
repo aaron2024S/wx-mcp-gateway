@@ -103,7 +103,17 @@ const s2 = new AppStore({ dataDir: dir, baseConfig, log: null });
 eq('重启后 token 还在', s2.resolvedApps().find((a) => a.id === 'mail')?.auth?.token, 'UI-TOKEN');
 eq('重启后 key 还在', s2.resolvedProviders().deepseek.api_key, 'UI-KEY');
 
-console.log('\n[10] 不合法的输入要被挡住');
+// 出厂配置必须保持"空"：不带应用、不带任何 AI 厂商。
+// 写死几家厂商的后果是用户以为只支持那几家——名单一直在变，代码不该替用户决定。
+console.log('\n[10] 出厂配置不带任何厂商与应用');
+const example = JSON.parse(fs.readFileSync(new URL('../config.example.json', import.meta.url), 'utf8'));
+eq('providers 为空', Object.keys(example.llm?.providers || {}).length, 0);
+eq('default 为空', example.llm?.default || '', '');
+eq('fallback 为空', (example.llm?.fallback || []).length, 0);
+eq('apps 为空', (example.apps || []).length, 0);
+ok('AI 兜底默认关闭', example.llm?.enabled === false);
+
+console.log('\n[11] 不合法的输入要被挡住');
 const rejects = (name, fn) => {
   let threw = false;
   try { fn(); } catch { threw = true; }

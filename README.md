@@ -184,7 +184,7 @@ Node ≥ 20。
 | 填什么 | 在哪填 |
 |---|---|
 | 应用的访问令牌（MailNest 等） | **应用** 页 → 该应用 → 编辑 → 「访问令牌」 |
-| AI 服务商的 API key | **设置** 页 → AI 接入 → 新增/编辑 → 「API Key」 |
+| AI 服务商的 API key | **设置** 页 → AI 路由 → 「添加服务商」 → 「API Key」 |
 | 网关自己的登录密码 | 首次打开时设；之后在 **设置 → 通用 → 修改密码** |
 
 存进 `data/secrets.json`（0600），接口永不回传原值，界面上只显示「已设置」。所以 `docker-compose.yml` 的 `environment` 里不需要放任何令牌——那些值一旦写进 compose 文件，反而容易跟着文件一起被备份、截图、传群。
@@ -209,15 +209,9 @@ Node ≥ 20。
   },
   "llm": {
     "enabled": false,
-    "default": "deepseek",
-    "providers": {
-      "deepseek": {
-        "type": "openai",
-        "base_url": "https://api.deepseek.com/v1",
-        "model": "deepseek-chat",
-        "api_key": ""            // 留空，去网页里填
-      }
-    }
+    "default": "",              // 在设置页添加服务商后指定，留空则用第一个
+    "fallback": [],             // 按顺序重试，比如 ["backup"]
+    "providers": {}             // 出厂为空，去设置页添加（见下文）
   },
   "apps": [
     {
@@ -244,7 +238,7 @@ Node ≥ 20。
 上面所有 `token` / `api_key` 都是空串，去网页里填就行。如果因为某些原因必须让凭据**不出现在 `data/` 目录里**（比如这个卷会跟别人共享），`config.json` 支持 `${VAR}` 占位，启动时从容器环境变量取值：
 
 ```json
-"api_key": "${DEEPSEEK_API_KEY}",
+"api_key": "${MY_LLM_API_KEY}",
 "auth": { "token": "${MAILNEST_TOKEN}" }
 ```
 
@@ -342,7 +336,19 @@ Node ≥ 20。
 
 `llm_when` 四档控制什么时候调它：`never` / `miss`（默认，本地没命中才问）/ `ambiguous` / `always`。本地能确定时**一次外部请求都不发**。
 
-支持任何兼容 `/chat/completions` 的服务（DeepSeek、通义、Kimi、智谱、Groq、Ollama、vLLM、LM Studio），Claude 单走 `/v1/messages`。**设置页点「新增服务商」，选个预设、粘上 key 就能用，不用改配置也不用手改文件。**
+支持任何兼容 `/chat/completions` 的服务（DeepSeek、通义、Kimi、智谱、硅基流动、OpenRouter、Groq、xAI、Ollama、vLLM、LM Studio……名单还在变，所以**代码里不写死厂商**），Claude 单走 `/v1/messages`。**设置页点「添加服务商」，填厂商文档里的接口地址、模型名和 key 就能用**——下拉里的预设只是替你把这几个字段填好，没列进去的选「自定义」一样加。
+
+出厂 `providers` 是空的：默认不预设任何厂商，也不带任何 key。想直接用某家，就加一条：
+
+| 字段 | 填什么 | 例子 |
+|---|---|---|
+| 标识 | 自己起的名，字母数字下划线短横线 | `my-llm` |
+| 协议 | 绝大多数选「OpenAI 兼容」 | `openai` |
+| 接口地址 | 厂商给的基础地址，**要含 `/v1` 这种版本段，不要带 `/chat/completions`** | `https://api.example.com/v1` |
+| 模型 | 厂商文档里的模型名 | 看厂商文档 |
+| API Key | 没有鉴权的本地服务留空 | `sk-...` |
+
+地址填错、模型名不存在、key 无效，都点一次「测试」就能看出来，不用先保存再试。要让 AI 真正参与路由，还得把上面的「启用 AI 兜底」打开。
 
 ---
 

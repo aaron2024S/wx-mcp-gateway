@@ -53,7 +53,7 @@ if (!fs.existsSync(CFG_TARGET)) {
   if (fs.existsSync(example)) {
     ensureDir(path.dirname(CFG_TARGET));
     fs.copyFileSync(example, CFG_TARGET);
-    console.log(`[init] 没有找到配置，已从示例生成 ${CFG_TARGET}——先改 apps 里的地址和 allow_risk。`);
+    console.log(`[init] 没有找到配置，已从示例生成 ${CFG_TARGET}——应用和 AI 服务商都在网页里添加，不用改这个文件。`);
   }
 }
 
