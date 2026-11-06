@@ -49,14 +49,17 @@ export function tokenize(s) {
 }
 
 // 从 title 自动派生「动作词」别名：中文工具 title 几乎都是「动词+名词」
-// （删除邮件 / 搜索邮件 / 发送邮件），前 1~2 字就是用户会说的那个动词。
-// 这让「删」「搜」「发」这类单字命令能命中，而人工一个字都不用写。
+// （删除邮件 / 搜索邮件 / 发送邮件），前 2 字就是用户会说的那个动词。
+//
+// 只取 2 字，不再派生 1 字。曾经为了「删」「搜」这类单字命令额外取了 title 首字，
+// 结果是「读取附件内容」派生出「读」——用户问「有几**读**封未读邮件」时被这半个字
+// 硬匹配到 0.82（高于阈值直接执行），把一个询问未读数的句子路由成"读附件"，
+// 还反过来向用户要 uid。单字命令由 token 覆盖率兜底（title 里的字权重 1.6，
+// 单字再打 0.8 折仍有 0.7 左右，够过阈值），不需要这条捷径。
 function deriveTitleAliases(title) {
   const t = String(title || '').trim();
   if (t.length < 2) return [];
-  const out = [t.slice(0, 2)];
-  if (t.length >= 3) out.push(t.slice(0, 1));
-  return out.filter((a) => a.length >= 1 && !STOP.has(a));
+  return [t.slice(0, 2)].filter((a) => !STOP.has(a));
 }
 
 // 把工具声明推导成风险等级。应用自报的 annotations 不全可信，所以这只是"默认值"，
@@ -265,13 +268,11 @@ export class Registry {
         const al = String(a).toLowerCase();
         if (al.length >= 2 && qLower.includes(al)) hard = 1;
       }
-      // ①' 从 title 派生的动作词（「删」「删除」「搜」「搜索」）：次之，0.82
-      if (hard < 0.82) {
-        for (const a of tool.derived) {
-          const al = String(a).toLowerCase();
-          if (al.length >= 1 && qLower.includes(al)) { hard = Math.max(hard, 0.82); }
-        }
-      }
+      // ①' 从 title 派生的动作词不再算「硬命中」。
+      //     它本质是「title 前两字是不是句子的子串」——中文没有词边界，
+      //     「读取」会命中「读取失败」「读取出错」，「删除」会命中「删除记录」，
+      //     一次 0.82 就直接越过 0.5 阈值执行，代价是选错工具还要用户补参数。
+      //     派生词已经以 1.8 的权重进了 token 表，走 idf 归一化，够用了。
       // ② 名称整体命中
       const bare = tool.name.replace(/_/g, ' ');
       const nameHit = qLower.includes(tool.name.toLowerCase()) || qLower.includes(bare.toLowerCase());

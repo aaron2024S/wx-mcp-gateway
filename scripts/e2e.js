@@ -333,6 +333,35 @@ async function main() {
     ok('老用户只存过 gw_theme 也能迁移', js.includes("removeItem('gw_theme')"));
   }
 
+  console.log('\n=== ④e 标题「读」「删」这类单字不再抢路由 ===');
+  {
+    // 真实事故：用户问「有几封未读邮件」，本地索引把 title「读取附件内容」的首字「读」
+    // 当成动作词硬命中（0.82 > 阈值），于是去调 read_attachment、回头要 uid。
+    // 这里用一组最小工具复现那条路径，钉住修复。
+    const rr = new Registry({ routing: { local_threshold: 0.5, ask_threshold: 0.25 }, apps: [] });
+    rr.apps.set('mail', {
+      cfg: { id: 'mail', label: '邮箱' },
+      status: 'online',
+      rawTools: [
+        { name: 'read_attachment', title: '读取附件内容', description: '读取一封邮件里某个附件的内容', annotations: { readOnlyHint: true } },
+        { name: 'read_message', title: '读取邮件正文', description: '读取一封邮件的正文', annotations: { readOnlyHint: true } },
+        { name: 'unread_count', title: '查询未读数量', description: '查有多少封未读邮件', annotations: { readOnlyHint: true } },
+      ],
+    });
+    rr._build();
+
+    const m1 = rr.match('有几封未读邮件');
+    ok('问未读数不再落到「读附件」', m1.best?.tool.name !== 'read_attachment', m1.best?.tool.key);
+    ok('而是落到未读相关的工具', m1.best?.tool.name === 'unread_count', m1.best?.tool.key);
+
+    const m2 = rr.match('读取附件');
+    ok('真要读附件时仍然命中', m2.best?.tool.name === 'read_attachment' && m2.confident, `${m2.best?.tool.key} / ${m2.best?.score?.toFixed(2)}`);
+
+    // 单字别名不再进索引：句子里出现「读」「删」这种字不足以把工具顶成 confident
+    const singles = rr.tools.flatMap((t) => t.derived.filter((a) => a.length < 2));
+    ok('标题不再派生出单字别名', singles.length === 0, singles.join(','));
+  }
+
   console.log('\n=== ⑤ 重投去重 ===');
   outbox.length = 0;
   calls.length = 0;
