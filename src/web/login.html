@@ -306,11 +306,20 @@
   var state = { mode: 'loading', busy: false, locked: false, lockDeadline: 0, maxFailures: 5 };
   var timer = null;
 
-  // 跟随控制台里选过的主题；没选过就用深色
+  // 跟控制台里选的模式一致：auto 则看系统，没选过也是 auto
+  var themeMode = 'auto';
   try {
-    var t = localStorage.getItem('gw_theme');
-    if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
+    var m = localStorage.getItem('gw_theme_mode') || localStorage.getItem('gw_theme') || 'auto';
+    if (m === 'light' || m === 'dark' || m === 'auto') themeMode = m;
   } catch (e) { /* 隐私模式下 localStorage 会抛 */ }
+  var mqDark = window.matchMedia('(prefers-color-scheme: dark)');
+  function paintTheme() {
+    var dark = themeMode === 'dark' || (themeMode === 'auto' && mqDark.matches);
+    document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  }
+  paintTheme();
+  if (mqDark.addEventListener) mqDark.addEventListener('change', paintTheme);
+  else if (mqDark.addListener) mqDark.addListener(paintTheme);
 
   function api(path, opts) {
     return fetch(path, Object.assign({ headers: { 'Content-Type': 'application/json' } }, opts || {}))

@@ -320,6 +320,19 @@ async function main() {
   await registry.refreshAll();
   ok('复原后回到 4 个工具', registry.tools.length === 4, JSON.stringify(registry.tools.map((t) => t.name)));
 
+  console.log('\n=== ④d 主题三态：跟随系统 / 浅色 / 深色 ===');
+  {
+    const read = (p) => fs.readFileSync(new URL(`../src/web/${p}`, import.meta.url), 'utf8');
+    const html = read('index.html');
+    const js = read('app.js');
+    const modes = [...html.matchAll(/data-theme-mode="([a-z]+)"/g)].map((m) => m[1]);
+    ok('面板上有三个档位', modes.length === 3 && ['auto', 'light', 'dark'].every((m) => modes.includes(m)), modes.join(','));
+    ok('每档都配了图标', (html.match(/seg-btn[\s\S]*?<svg/g) || []).length >= 3);
+    ok('缺省是跟随系统', js.includes("|| 'auto'") && js.includes("THEME_KEY = 'gw_theme_mode'"));
+    ok('系统明暗变化能实时跟随', js.includes('prefers-color-scheme') && js.includes('addEventListener'));
+    ok('老用户只存过 gw_theme 也能迁移', js.includes("removeItem('gw_theme')"));
+  }
+
   console.log('\n=== ⑤ 重投去重 ===');
   outbox.length = 0;
   calls.length = 0;

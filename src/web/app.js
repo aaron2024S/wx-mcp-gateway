@@ -43,16 +43,47 @@ function toast(msg) {
   t._timer = setTimeout(() => t.classList.remove('on'), 2400);
 }
 
-// ---- 主题 -------------------------------------------------------------
+// ---- 主题：跟随系统 / 浅色 / 深色 --------------------------------------
 
-function applyTheme(t) {
-  document.documentElement.dataset.theme = t;
-  localStorage.setItem('gw_theme', t);
+const THEME_KEY = 'gw_theme_mode';
+const THEME_MODES = ['auto', 'light', 'dark'];
+const mqDark = window.matchMedia('(prefers-color-scheme: dark)');
+let themeMode = 'auto';
+
+function resolveTheme(mode) {
+  return mode === 'auto' ? (mqDark.matches ? 'dark' : 'light') : mode;
 }
-applyTheme(localStorage.getItem('gw_theme') || 'dark');
-$('#themeBtn').onclick = () => {
-  applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark');
-};
+
+function paintTheme() {
+  document.documentElement.dataset.theme = resolveTheme(themeMode);
+  document.documentElement.dataset.themeMode = themeMode;
+  $$('.seg-btn[data-theme-mode]').forEach((b) => {
+    const on = b.dataset.themeMode === themeMode;
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-pressed', on ? 'true' : 'false');
+  });
+}
+
+function setThemeMode(mode) {
+  themeMode = THEME_MODES.includes(mode) ? mode : 'auto';
+  try {
+    localStorage.setItem(THEME_KEY, themeMode);
+    localStorage.removeItem('gw_theme'); // 旧版只存过一次 light/dark，迁移完就清掉
+  } catch (e) { /* 隐私模式下忽略 */ }
+  paintTheme();
+}
+
+// 老用户身上只有 gw_theme，按它推断一次，之后统一用 gw_theme_mode
+setThemeMode(localStorage.getItem(THEME_KEY) || localStorage.getItem('gw_theme') || 'auto');
+$$('.seg-btn[data-theme-mode]').forEach((b) => {
+  b.onclick = () => setThemeMode(b.dataset.themeMode);
+});
+
+// 跟随系统时，系统在明暗之间切换要实时跟过去（不用刷新）
+const onSystemThemeChange = () => { if (themeMode === 'auto') paintTheme(); };
+if (mqDark.addEventListener) mqDark.addEventListener('change', onSystemThemeChange);
+else if (mqDark.addListener) mqDark.addListener(onSystemThemeChange); // 老内核
+
 $('#logoutBtn').onclick = doLogout;
 
 // ---- 导航 -------------------------------------------------------------
