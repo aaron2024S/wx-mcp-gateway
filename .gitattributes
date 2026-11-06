@@ -1,0 +1,11 @@
+# 统一用 LF：这个项目在 Windows 上开发、在 Linux 容器里跑，
+# 换行符被改坏时 Dockerfile 的 COPY 和 node 的解析都可能出怪问题。
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary

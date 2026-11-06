@@ -1,0 +1,82 @@
+{
+  "gateway": {
+    "default_app": null,
+    "confirm_risk": [
+      "high"
+    ],
+    "confirm_ttl": 60,
+    "call_timeout": 20,
+    "async_after": 10
+  },
+  "routing": {
+    "local_threshold": 0.5,
+    "ask_threshold": 0.25,
+    "llm_when": "miss"
+  },
+  "llm": {
+    "enabled": false,
+    "default": "deepseek",
+    "fallback": [
+      "ollama"
+    ],
+    "timeout": 15,
+    "max_tokens": 512,
+    "on_error": "local",
+    "providers": {
+      "deepseek": {
+        "label": "DeepSeek",
+        "type": "openai",
+        "base_url": "https://api.deepseek.com/v1",
+        "model": "deepseek-chat",
+        "api_key": "${DEEPSEEK_API_KEY}"
+      },
+      "ollama": {
+        "label": "本机 Ollama",
+        "type": "openai",
+        "base_url": "${OLLAMA_BASE_URL}",
+        "model": "qwen2.5:7b",
+        "api_key": ""
+      },
+      "claude": {
+        "label": "Claude",
+        "type": "anthropic",
+        "base_url": "https://api.anthropic.com",
+        "model": "claude-sonnet-4-5",
+        "api_key": "${ANTHROPIC_API_KEY}"
+      }
+    }
+  },
+  "apps": [
+    {
+      "id": "mail",
+      "label": "邮箱",
+      "aliases": [
+        "邮件",
+        "信箱"
+      ],
+      "transport": "mcp-http",
+      "url": "http://mailnest:8006/mcp",
+      "auth": {
+        "type": "bearer",
+        "token": "${MAILNEST_TOKEN}"
+      },
+      "allow_risk": [
+        "read"
+      ],
+      "tools": {
+        "aliases": {
+          "list_messages": [
+            "未读"
+          ]
+        },
+        "risk_overrides": {
+          "delete_messages": "high",
+          "send_message": "high"
+        }
+      }
+    }
+  ],
+  "wechat": {
+    "base_url": "https://ilinkai.weixin.qq.com"
+  }
+}

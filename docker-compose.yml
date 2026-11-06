@@ -1,0 +1,51 @@
+# 微信 MCP 网关
+#
+# 部署要点只有两条：
+#   ① 必须和「要被控制的应用」在同一个 docker network 里，否则解析不到服务名；
+#   ② 只暴露控制台的 8787，不需要任何入站端口给微信——链路是纯出站的。
+#
+# 微信号不需要公网 IP、不需要端口映射、不需要 DDNS。
+
+services:
+  wx-mcp-gateway:
+    build: .
+    # 和 CI 推送到 Docker Hub 的名字保持一致：本地 `docker compose build`
+    # 出来的镜像可以直接 `docker push`，不用再 tag 一次。
+    # 用现成镜像时把 build 那行删掉即可。
+    image: aaron2024s/wx-mcp-gateway:0.2.1
+    container_name: wx-mcp-gateway
+    restart: unless-stopped
+
+    ports:
+      # 只给局域网看控制台。不想暴露就删掉这段，用 NAS 的反代或 SSH 隧道访问。
+      - "8787:8787"
+
+    volumes:
+      # 这一个目录装了全部状态：config.json、微信绑定、调用日志、AI 密钥
+      - ./data:/data
+
+    environment:
+      TZ: Asia/Shanghai
+      GATEWAY_DATA: /data
+      GATEWAY_CONFIG: /data/config.json
+      # 可选：给控制台加一道门。设了就要求输入这个令牌。
+      # GATEWAY_WEB_TOKEN: ${GATEWAY_WEB_TOKEN}
+      # 应用凭据走环境变量，不要写进 config.json（那个文件要能进 git）
+      MAILNEST_TOKEN: ${MAILNEST_TOKEN:-}
+
+    networks:
+      - nas
+
+    # 长轮询是常驻连接，日志留一点就够，别让 json-file 驱动把磁盘吃满
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+networks:
+  # 复用 NAS 上已有的网络。用 `docker network ls` 看你的实际名字，
+  # 常见是 bridge 自定义网络或 compose 自动建的 <目录名>_default。
+  nas:
+    external: true
+    name: nas

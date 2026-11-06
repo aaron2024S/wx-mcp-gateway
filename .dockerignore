@@ -1,0 +1,11 @@
+node_modules
+data
+.tmp-run
+.tmp
+.demo-data
+.demo-config.json
+*.log
+.DS_Store
+.git
+.gitignore
+README.md

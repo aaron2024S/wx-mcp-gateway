@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>微信 MCP 网关</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<aside>
+  <div class="brand">
+    <div class="brand-mark">
+      <svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M2.5 4.2h11M2.5 8h11M2.5 11.8h6" stroke="#fff" stroke-width="1.5" stroke-linecap="round"/></svg>
+    </div>
+    <div>
+      <div class="brand-name">微信 MCP 网关</div>
+      <div class="brand-sub" id="brandSub">未连接</div>
+    </div>
+  </div>
+
+  <nav>
+    <button class="nav-item active" data-page="overview">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="2" y="2" width="5" height="5" rx="1.2" stroke="currentColor" stroke-width="1.2"/><rect x="9" y="2" width="5" height="5" rx="1.2" stroke="currentColor" stroke-width="1.2"/><rect x="2" y="9" width="5" height="5" rx="1.2" stroke="currentColor" stroke-width="1.2"/><rect x="9" y="9" width="5" height="5" rx="1.2" stroke="currentColor" stroke-width="1.2"/></svg>
+      概览
+    </button>
+    <button class="nav-item" data-page="apps">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 2l6 3.2v5.6L8 14l-6-3.2V5.2L8 2z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M2 5.2L8 8.4l6-3.2M8 8.4V14" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>
+      应用<span class="nav-count" id="navApps">0</span>
+    </button>
+    <button class="nav-item" data-page="tools">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M9.5 2.5a3.5 3.5 0 00-4.6 4.6L2 10.1 3.9 12l2.9-2.9a3.5 3.5 0 004.6-4.6L9.3 6.6 7.4 4.7l2.1-2.2z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>
+      工具<span class="nav-count" id="navTools">0</span>
+    </button>
+    <button class="nav-item" data-page="logs">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 3.5h12M2 8h12M2 12.5h8" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+      调用日志
+    </button>
+    <button class="nav-item" data-page="settings">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="2.2" stroke="currentColor" stroke-width="1.2"/><path d="M8 1.6v1.6M8 12.8v1.6M14.4 8h-1.6M3.2 8H1.6M12.5 3.5l-1.1 1.1M4.6 11.4l-1.1 1.1M12.5 12.5l-1.1-1.1M4.6 4.6L3.5 3.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+      设置
+    </button>
+  </nav>
+
+  <div class="side-foot">
+    <div class="row">
+      <span class="lbl">主题</span>
+      <button class="btn sm ghost" id="themeBtn">切换</button>
+    </div>
+    <div class="row" style="margin-bottom:0">
+      <span class="lbl" id="verLabel">v0.2.0</span>
+      <span class="lbl" id="upLabel"></span>
+    </div>
+  </div>
+</aside>
+
+<main>
+  <div class="topbar">
+    <h1 id="pageTitle">概览</h1>
+    <span class="sub" id="pageSub"></span>
+    <div class="spacer"></div>
+    <span class="pill" id="wxPill"><span class="dot off"></span><span id="wxPillText">未绑定</span></span>
+    <button class="btn sm ghost" id="refreshBtn">刷新</button>
+  </div>
+
+  <!-- 概览 -->
+  <section class="page active" id="page-overview">
+    <div class="grid metric">
+      <div class="metric-card"><p class="k">微信</p><p class="v" id="mWx">—</p></div>
+      <div class="metric-card"><p class="k">在线应用</p><p class="v" id="mApps">—</p></div>
+      <div class="metric-card"><p class="k">可用工具</p><p class="v" id="mTools">—</p></div>
+      <div class="metric-card"><p class="k">今日调用</p><p class="v" id="mCalls">—</p></div>
+    </div>
+
+    <div class="section-title">应用<span class="line"></span><button class="btn sm ghost" data-goto="apps">管理</button></div>
+    <div class="grid apps" id="overviewApps"></div>
+
+    <div class="section-title" style="margin-top:26px">最近调用<span class="line"></span><button class="btn sm ghost" data-goto="logs">全部</button></div>
+    <div class="tbl-wrap" id="recentTable"></div>
+  </section>
+
+  <!-- 应用 -->
+  <section class="page" id="page-apps">
+    <div style="display:flex; align-items:center; gap:10px; margin-bottom:14px">
+      <p style="font-size:12.5px; color:var(--text-faint); margin:0">接入 MCP server，改配置即可，不用改代码。</p>
+      <div style="flex:1"></div>
+      <button class="btn primary" id="addAppBtn">添加应用</button>
+    </div>
+    <div class="grid apps" id="appGrid"></div>
+  </section>
+
+  <!-- 工具 -->
+  <section class="page" id="page-tools">
+    <p style="font-size:12.5px; color:var(--text-faint); margin:0 0 14px">
+      全部工具由各应用的 <span class="mono">tools/list</span> 现场派生。点一下可以直接跑，用来验证链路。
+    </p>
+    <div id="toolGroups"></div>
+  </section>
+
+  <!-- 日志 -->
+  <section class="page" id="page-logs">
+    <div class="tbl-wrap">
+      <div id="logTable" class="tbl-scroll"></div>
+      <div class="pager" id="logPager"></div>
+    </div>
+  </section>
+
+  <!-- 设置 -->
+  <section class="page" id="page-settings">
+    <div class="section-title">微信通道<span class="line"></span></div>
+    <div class="card" id="wxCard" style="margin-bottom:26px"></div>
+
+    <div class="section-title">通用<span class="line"></span></div>
+    <div class="card" style="margin-bottom:26px">
+      <div class="set-row">
+        <div class="grow"><div style="font-size:13px">危险操作二次确认</div><div class="hint">高危工具执行前要求回复「确认」</div></div>
+        <select id="setConfirmRisk">
+          <option value="high">仅高危</option>
+          <option value="write,high">写入及以上</option>
+          <option value="">不确认（不建议）</option>
+        </select>
+      </div>
+      <div class="set-row">
+        <div class="grow"><div style="font-size:13px">确认有效期</div><div class="hint">超时后旧操作作废，避免翻到旧消息误触</div></div>
+        <div class="ctl"><input type="number" id="setConfirmTtl" min="10" max="600"><span class="unit">秒</span></div>
+      </div>
+      <div class="set-row">
+        <div class="grow"><div style="font-size:13px">单次调用超时</div><div class="hint">超过就放弃等待，提示用户稍后看结果</div></div>
+        <div class="ctl"><input type="number" id="setCallTimeout" min="5" max="300"><span class="unit">秒</span></div>
+      </div>
+      <div class="set-row">
+        <div class="grow"><div style="font-size:13px">先回执阈值</div><div class="hint">超过这个时间还没跑完，先发一句「还在跑」</div></div>
+        <div class="ctl"><input type="number" id="setAsyncAfter" min="1" max="120"><span class="unit">秒</span></div>
+      </div>
+      <div class="set-row">
+        <div class="grow"><div style="font-size:13px">默认应用</div><div class="hint">多个应用有同名工具时优先给谁</div></div>
+        <select id="setDefaultApp"></select>
+      </div>
+    </div>
+
+    <div class="section-title">日志<span class="line"></span></div>
+    <div class="card" style="margin-bottom:26px">
+      <div class="set-row">
+        <div class="grow"><div style="font-size:13px">保留条数</div><div class="hint">50 ~ 200 条，超出后自动丢弃最早的</div></div>
+        <div class="ctl"><input type="number" id="setLogKeep" min="50" max="200"><span class="unit">条</span></div>
+      </div>
+    </div>
+
+    <div class="section-title">AI 路由<span class="line"></span><button class="btn sm ghost" id="addProvBtn">添加服务商</button></div>
+    <div class="card">
+      <div class="set-row">
+        <div class="grow"><div style="font-size:13px">启用 AI 兜底</div><div class="hint">关掉时完全走本地别名表，不发任何外部请求</div></div>
+        <label class="switch"><input type="checkbox" id="setLlmEnabled"><span></span></label>
+      </div>
+      <div class="set-row">
+        <div class="grow"><div style="font-size:13px">什么时候问 AI</div><div class="hint">本地能确定时绝不惊动 AI，省时省钱也不外发隐私</div></div>
+        <select id="setLlmWhen">
+          <option value="never">从不用</option>
+          <option value="miss">本地没命中时</option>
+          <option value="ambiguous">命中但有歧义时</option>
+          <option value="always">总是先问 AI</option>
+        </select>
+      </div>
+      <div class="set-row">
+        <div class="grow"><div style="font-size:13px">默认服务商</div><div class="hint">失败会按顺序切到下一家</div></div>
+        <select id="setLlmDefault"></select>
+      </div>
+      <div id="provList" style="margin-top:6px"></div>
+    </div>
+  </section>
+</main>
+
+<!-- 添加应用向导 -->
+<div class="modal hidden" id="appModal">
+  <div class="modal-card">
+    <div class="modal-head">
+      <h2 id="wzTitle">添加应用</h2>
+      <p id="wzDesc">选择接入方式</p>
+      <div style="display:flex; gap:6px; margin-bottom:14px">
+        <div data-bar="1" style="flex:1; height:3px; border-radius:2px; background:var(--border)"></div>
+        <div data-bar="2" style="flex:1; height:3px; border-radius:2px; background:var(--border)"></div>
+        <div data-bar="3" style="flex:1; height:3px; border-radius:2px; background:var(--border)"></div>
+      </div>
+    </div>
+    <div class="modal-body">
+      <div class="wstep on" data-step="1">
+        <div class="opt sel" data-mode="http">
+          <div class="radio-mark"></div>
+          <div>
+            <p class="t">远程 HTTP 端点 <span class="badge ghost">MCP</span></p>
+            <p class="d">应用自己提供 /mcp。跨容器、跨机器都能用，首选。</p>
+          </div>
+        </div>
+        <div class="opt" data-mode="manifest">
+          <div class="radio-mark"></div>
+          <div>
+            <p class="t">私有 manifest <span class="badge no">非 MCP</span></p>
+            <p class="d">应用只加了两个普通接口（/agent/manifest + /agent/exec），由网关做适配。第三方 MCP 客户端连不上它。</p>
+          </div>
+        </div>
+        <div class="test-result" id="manifestNote" style="background:var(--amber-soft); border:1px solid transparent; margin-top:14px">
+          <p class="tr-title" style="color:var(--amber); margin:0">这一版还没实现</p>
+          <div style="color:var(--amber); font-size:11.5px; line-height:1.6">
+            私有 manifest 需要一个额外的适配器，等真有第二个非 MCP 的应用再加。现在先走标准 MCP。
+          </div>
+        </div>
+      </div>
+
+      <div class="wstep" data-step="2">
+        <div class="field">
+          <label>显示名称</label>
+          <input id="wzLabel" placeholder="例如：邮箱">
+        </div>
+        <div class="field">
+          <label>标识</label>
+          <input id="wzId" class="mono-input" placeholder="mail（字母数字，用于工具名前缀）">
+          <div class="hint">会出现在工具名里：<span class="mono">mail.list_messages</span>。定了就别改，改了旧日志对不上。</div>
+        </div>
+        <div class="field">
+          <label>口语别名</label>
+          <input id="wzAlias" placeholder="邮件 · 信箱（用顿号或逗号分隔）">
+          <div class="hint">用户不会说 id，会这么说。这个字段比名字更影响命中率。</div>
+        </div>
+        <div class="field">
+          <label>端点地址</label>
+          <input id="wzUrl" class="mono-input" placeholder="http://mailnest:8006/mcp">
+          <div class="hint">容器之间用服务名，不要写 localhost；端口是容器内端口。</div>
+        </div>
+        <div class="field">
+          <label>访问令牌</label>
+          <input id="wzToken" type="password" placeholder="留空表示不需要鉴权">
+          <div class="hint">保存后只显示「已设置」，永远不会回传给前端。</div>
+        </div>
+        <div class="field">
+          <label>允许的操作等级</label>
+          <div style="display:flex; gap:14px; font-size:12.5px; color:var(--text-dim)">
+            <label style="display:flex; align-items:center; gap:6px; margin:0"><input type="checkbox" id="wzRiskRead" checked> 只读</label>
+            <label style="display:flex; align-items:center; gap:6px; margin:0"><input type="checkbox" id="wzRiskWrite"> 写入</label>
+            <label style="display:flex; align-items:center; gap:6px; margin:0"><input type="checkbox" id="wzRiskHigh"> 高危</label>
+          </div>
+          <div class="hint">这是网关的硬上限，应用自己声明的等级不能突破它。</div>
+        </div>
+        <button class="btn" id="testBtn">测试连接</button>
+        <div class="test-result" id="testResult"></div>
+      </div>
+
+      <div class="wstep" data-step="3">
+        <p style="font-size:12px; color:var(--text-faint); margin:0 0 12px" id="toolHint"></p>
+        <div id="toolPick"></div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn ghost" id="wzCancel">取消</button>
+      <div style="flex:1"></div>
+      <button class="btn ghost" id="wzPrev">上一步</button>
+      <button class="btn primary" id="wzNext" disabled>下一步</button>
+    </div>
+  </div>
+</div>
+
+<!-- AI 服务商 -->
+<div class="modal hidden" id="provModal">
+  <div class="modal-card" style="width:520px">
+    <div class="modal-head">
+      <h2>添加 AI 服务商</h2>
+      <p>任何兼容 OpenAI 接口的服务都能用</p>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label>预设</label>
+        <select id="pvPreset">
+          <option value="">自定义</option>
+          <option value="deepseek">DeepSeek</option>
+          <option value="openai">OpenAI</option>
+          <option value="moonshot">Moonshot / Kimi</option>
+          <option value="dashscope">通义千问（DashScope）</option>
+          <option value="zhipu">智谱 GLM</option>
+          <option value="ollama">本地 Ollama</option>
+          <option value="anthropic">Claude（Anthropic 协议）</option>
+        </select>
+      </div>
+      <div class="field"><label>标识</label><input id="pvId" class="mono-input" placeholder="deepseek"></div>
+      <div class="field"><label>协议</label><select id="pvType"><option value="openai">OpenAI 兼容</option><option value="anthropic">Anthropic</option></select></div>
+      <div class="field"><label>接口地址</label><input id="pvBase" class="mono-input" placeholder="https://api.deepseek.com/v1"></div>
+      <div class="field"><label>模型</label><input id="pvModel" class="mono-input" placeholder="deepseek-chat"></div>
+      <div class="field">
+        <label>API Key</label>
+        <input id="pvKey" type="password" placeholder="留空表示不需要（如本地 Ollama）">
+        <div class="hint">存在服务端 secrets.json（0600），接口永不回传原值。</div>
+      </div>
+      <div style="display:flex; gap:10px; align-items:center">
+        <button class="btn" id="pvTest">测试</button>
+        <span id="pvResult" style="font-size:12px"></span>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn ghost" id="pvCancel">取消</button>
+      <div style="flex:1"></div>
+      <button class="btn primary" id="pvSave">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 执行工具 -->
+<div class="modal hidden" id="runModal">
+  <div class="modal-card" style="width:560px">
+    <div class="modal-head">
+      <h2 id="runTitle">执行工具</h2>
+      <p id="runDesc"></p>
+    </div>
+    <div class="modal-body">
+      <div id="runFields"></div>
+      <div class="test-result" id="runResult"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn ghost" id="runCancel">关闭</button>
+      <div style="flex:1"></div>
+      <button class="btn primary" id="runGo">执行</button>
+    </div>
+  </div>
+</div>
+
+<!-- 访问令牌 -->
+<div class="modal hidden" id="tokenModal">
+  <div class="modal-card" style="width:420px">
+    <div class="modal-head">
+      <h2>需要访问令牌</h2>
+      <p>这个网关设置了访问保护</p>
+    </div>
+    <div class="modal-body">
+      <div class="field"><label>令牌</label><input id="tkInput" type="password" placeholder="GATEWAY_WEB_TOKEN"></div>
+    </div>
+    <div class="modal-foot">
+      <div style="flex:1"></div>
+      <button class="btn primary" id="tkGo">进入</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+<script src="app.js"></script>
+</body>
+</html>
