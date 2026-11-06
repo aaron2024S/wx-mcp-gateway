@@ -71,9 +71,8 @@ services:
       - PORT=7337
       - GATEWAY_DATA=/data
       - GATEWAY_CONFIG=/data/config.json
-      # 应用凭据走环境变量，别写进 config.json（那个文件要能进 git）
-      # - MAILNEST_TOKEN=你的令牌
-      # - DEEPSEEK_API_KEY=你的 key
+      # 这里不用放任何令牌或 API key。
+      # 应用的访问令牌、AI 服务商的密钥都在网页里填，存进 /data/secrets.json。
 
     volumes:
       # 这一个目录装了全部状态：配置、登录密码、微信绑定、调用日志、AI 密钥
@@ -87,6 +86,8 @@ services:
 ```
 
 首次启动时 `data/` 里没有 `config.json`，容器会自己从镜像内的示例复制一份，所以不用先准备文件。起来后打开 `http://<NAS的IP>:7337` 设置访问密码。
+
+**凭据全部在网页里填**，不用改文件、不用重启：应用页加应用时填它的访问令牌，设置页加 AI 服务商时填 API Key。它们存在 `data/secrets.json`（0600），接口不会把原值回传，界面上只显示「已设置」。
 
 **要连其他应用（如 MailNest）时，网关必须和它在同一个 docker 网络**，否则 `http://mailnest:8006/mcp` 这种服务名解析不到。在 compose 里补上：
 
@@ -176,7 +177,17 @@ Node ≥ 20。
 
 ## 配置
 
-`config.json` 是**手写**的那一份，界面永不回写它（避免把 `${ENV}` 替换后的明文密钥写进磁盘）。界面上的改动落在 `data/overrides.json`，密钥落在 `data/secrets.json`。
+**凭据都在网页里填，不用碰文件，也不用配环境变量。**
+
+| 填什么 | 在哪填 |
+|---|---|
+| 应用的访问令牌（MailNest 等） | **应用** 页 → 该应用 → 编辑 → 「访问令牌」 |
+| AI 服务商的 API key | **设置** 页 → AI 接入 → 新增/编辑 → 「API Key」 |
+| 网关自己的登录密码 | 首次打开时设；之后在 **设置 → 通用 → 修改密码** |
+
+存进 `data/secrets.json`（0600），接口永不回传原值，界面上只显示「已设置」。所以 `docker-compose.yml` 的 `environment` 里不需要放任何令牌——那些值一旦写进 compose 文件，反而容易跟着文件一起被备份、截图、传群。
+
+`config.json` 只放**结构**（有哪些应用、地址是什么、风险上限、匹配阈值），不放凭据，因此可以安心进 git。
 
 ```json
 {
@@ -200,7 +211,7 @@ Node ≥ 20。
         "type": "openai",
         "base_url": "https://api.deepseek.com/v1",
         "model": "deepseek-chat",
-        "api_key": "${DEEPSEEK_API_KEY}"
+        "api_key": ""            // 留空，去网页里填
       }
     }
   },
@@ -211,7 +222,7 @@ Node ≥ 20。
       "aliases": ["邮件", "信箱"],
       "transport": "mcp-http",
       "url": "http://mailnest:8006/mcp",
-      "auth": { "token": "${MAILNEST_TOKEN}" },
+      "auth": { "token": "" },    // 留空，去网页里填
       "allow_risk": ["read"],
       "tools": {
         "aliases": { "list_messages": ["未读"] },
@@ -223,6 +234,17 @@ Node ≥ 20。
   ]
 }
 ```
+
+### 可选：用环境变量注入凭据
+
+上面所有 `token` / `api_key` 都是空串，去网页里填就行。如果因为某些原因必须让凭据**不出现在 `data/` 目录里**（比如这个卷会跟别人共享），`config.json` 支持 `${VAR}` 占位，启动时从容器环境变量取值：
+
+```json
+"api_key": "${DEEPSEEK_API_KEY}",
+"auth": { "token": "${MAILNEST_TOKEN}" }
+```
+
+代价要说清楚：**环境变量在 `docker inspect` 里是明文可见的**，安全性并不比 `secrets.json` 高，只是把文件换成了进程环境。没设这个变量时启动会打印警告并按空串处理（不会拒绝启动，因为有些应用免鉴权）。两种方式可以并存：界面里填过的值优先，没填过就沿用配置文件里的。
 
 ### 几个不直观但要紧的字段
 
@@ -316,7 +338,7 @@ Node ≥ 20。
 
 `llm_when` 四档控制什么时候调它：`never` / `miss`（默认，本地没命中才问）/ `ambiguous` / `always`。本地能确定时**一次外部请求都不发**。
 
-支持任何兼容 `/chat/completions` 的服务（DeepSeek、通义、Kimi、智谱、Groq、Ollama、vLLM、LM Studio），Claude 单走 `/v1/messages`。**新增一家通常只加一段配置。**
+支持任何兼容 `/chat/completions` 的服务（DeepSeek、通义、Kimi、智谱、Groq、Ollama、vLLM、LM Studio），Claude 单走 `/v1/messages`。**设置页点「新增服务商」，选个预设、粘上 key 就能用，不用改配置也不用手改文件。**
 
 ---
 
@@ -358,10 +380,11 @@ Node ≥ 20。
 ## 开发与测试
 
 ```bash
-npm test          # 端到端：假 iLink 网关 + 假 MCP，41 项断言
-npm run test:auth # 登录：起真服务走完设密码→登录→改密→锁定，49 项断言
-npm run test:llm  # AI 路由层：假 OpenAI/Anthropic 端点，22 项断言
-npm run demo      # 拉起真的 MailNest 跑一遍中文匹配
+npm test           # 端到端：假 iLink 网关 + 假 MCP，41 项断言
+npm run test:auth  # 登录：起真服务走完设密码→登录→改密→锁定，49 项断言
+npm run test:llm   # AI 路由层：假 OpenAI/Anthropic 端点，22 项断言
+npm run test:store # 配置合并：三层覆盖顺序 + 凭据不外泄，28 项断言
+npm run demo       # 拉起真的 MailNest 跑一遍中文匹配
 ```
 
 本地看界面（两个终端）：

@@ -72,11 +72,14 @@ export class AppStore {
       byId.set(a.id, { ...a, _source: 'config' });
     }
     for (const a of this.overrides.apps) {
-      const merged = { ...(byId.get(a.id) || {}), ...a, _source: 'ui' };
-      merged.auth = { type: 'bearer', token: this.secrets.tokens[a.id] || '' };
+      const base = byId.get(a.id) || {};
+      const merged = { ...base, ...a, _source: 'ui' };
+      // 界面没填过 token 时沿用 config.json 里的那份，否则「只改个名字」
+      // 会把写死在配置文件里的凭据悄悄抹掉，表现是对端突然 401。
+      merged.auth = { type: 'bearer', token: this.secrets.tokens[a.id] || base.auth?.token || '' };
       byId.set(a.id, merged);
     }
-    // config.json 里的应用也可能带 token（手写的 ${ENV}），保留原样
+    // config.json 里的应用也可能带 token（手写或用环境变量注入），保留原样
     return [...byId.values()];
   }
 
@@ -146,9 +149,13 @@ export class AppStore {
   // 用一份草稿试连，不入库。界面「测试连接」就是它。
   async testConnection(draft, tokenOverride) {
     const id = draft.id || 'probe';
+    // 界面上没填时，沿用这个应用已有的那份（可能来自 secrets.json，
+    // 也可能写在 config.json 里）。否则「只改地址点测试」会拿空令牌去连，
+    // 报鉴权失败，看上去像地址填错了。
+    const existing = this.resolvedApps().find((a) => a.id === id)?.auth?.token || '';
     const token = tokenOverride !== undefined && tokenOverride !== ''
       ? tokenOverride
-      : (this.secrets.tokens[id] || '');
+      : (this.secrets.tokens[id] || existing || '');
 
     const c = new McpClient({
       url: draft.url,
@@ -262,14 +269,17 @@ export class AppStore {
   }
 
   // 给 llm.js 用：合并后的 provider，含真实 key
+  // 顺序是「界面填的 > config.json 里的」，否则在界面上换了 key 却毫无反应，
+  // 只会表现为 AI 一直报鉴权失败，很难往"配置没生效"上想。
   resolvedProviders() {
     const base = this.baseConfig.llm?.providers || {};
     const out = {};
     for (const [id, p] of Object.entries(base)) {
-      out[id] = { ...p, api_key: p.api_key || this.secrets.apiKeys[id] || '' };
+      out[id] = { ...p, api_key: this.secrets.apiKeys[id] || p.api_key || '' };
     }
     for (const [id, p] of Object.entries(this.overrides.providers)) {
-      out[id] = { ...p, api_key: this.secrets.apiKeys[id] || '' };
+      // 界面只改了模型名、没重填 key 时，沿用 config.json 里那份
+      out[id] = { ...p, api_key: this.secrets.apiKeys[id] || base[id]?.api_key || '' };
     }
     return out;
   }

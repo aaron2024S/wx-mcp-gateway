@@ -32,7 +32,8 @@ jobs:
       # 出镜像之前先跑一遍测试：
       #   e2e    —— 假 iLink 网关 + 假 MCP server，41 项；
       #   auth   —— 起真服务走完设密码→登录→改密→锁定，49 项；
-      #   llm    —— 假 OpenAI/Anthropic 端点，22 项。
+      #   llm    —— 假 OpenAI/Anthropic 端点，22 项；
+      #   store  —— 配置/密钥三层合并顺序，28 项（权限位只在 Linux 上真校验）。
       # 这一步能挡住"字段名写错一个字母"这类只在真机上才暴露的问题。
       - name: 跑测试
         run: |
@@ -40,6 +41,7 @@ jobs:
           npm test
           npm run test:auth
           npm run test:llm
+          npm run test:store
 
       - name: 计算镜像标签
         id: meta
