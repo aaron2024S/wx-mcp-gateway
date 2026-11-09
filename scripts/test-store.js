@@ -3,6 +3,7 @@
 // 所以必须用断言把顺序钉死。用法：npm run test:store
 
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { AppStore } from '../src/appstore.js';
@@ -147,6 +148,32 @@ rejects('id 含非法字符', () => s.upsert({ id: '有 中文', url: 'http://x/
 rejects('缺 url', () => s.upsert({ id: 'ok1' }, ''));
 rejects('url 不是 http(s)', () => s.upsert({ id: 'ok2', url: 'ftp://x' }, ''));
 rejects('provider 缺 base_url', () => s.upsertProvider({ id: 'p1', model: 'm' }, ''));
+
+// 把 NAS 管理页这类地址填进来时的真实形状：GET 是 200（看着「通了」），
+// 但 MCP 握手是 POST，会被 307 转到 /desktop/ 再判 405。
+// 用户看到的必须是「这是网页，不是 MCP」，而不是「方法不被允许」这种协议黑话。
+console.log('\n[13] 填了网页地址要能一眼看出不是 MCP');
+const web = http.createServer((req, res) => {
+  if (req.method === 'GET') {
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.end('<html><body>UGOS</body></html>');
+    return;
+  }
+  if (req.url === '/') {
+    res.writeHead(307, { Location: '/desktop/?os=ugospro' });
+    res.end();
+    return;
+  }
+  res.writeHead(405, { 'Content-Type': 'text/html' });
+  res.end('<html><body>405 Not Allowed</body></html>');
+});
+await new Promise((r) => web.listen(0, '127.0.0.1', () => r()));
+const webProbe = await s.testConnection({ id: 'nas', url: `http://127.0.0.1:${web.address().port}/` }, '');
+ok('测试要判失败', webProbe.ok === false, JSON.stringify(webProbe).slice(0, 100));
+eq('归到路径类', webProbe.kind, 'path');
+ok('说明白是网页', /网页/.test(webProbe.message) && /网页/.test(webProbe.hint), webProbe.message);
+ok('给出下一步：去应用里开 MCP 拿带 /mcp 的地址', /MCP/.test(webProbe.hint) && /\/mcp/.test(webProbe.hint), webProbe.hint);
+web.close();
 
 try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* 清理失败不影响结论 */ }
 

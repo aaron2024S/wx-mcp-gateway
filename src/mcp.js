@@ -112,16 +112,26 @@ export class McpClient {
     if (!res.ok) {
       let sample = '';
       try { sample = (await res.text()).slice(0, 300); } catch { /* 忽略 */ }
+      // 请求被重定向过、且最后落在 HTML 上 ⇒ 这个地址是个网页，不是 MCP 端点。
+      // 典型场景：把 NAS/路由器的管理页地址（如 http://nas:9999）填了进来，
+      // 它对 GET 回 200 让人以为「通了一半」，但任何 POST 都会被判 405。
+      const landed = res.url && res.url !== this.url ? res.url : '';
+      const looksHtml = /text\/html/i.test(String(res.headers.get('content-type') || ''));
+      const webPage = looksHtml || !!landed;
+
       const map = {
         401: ['auth', '鉴权失败（令牌无效或过期）'],
         403: ['auth', '被拒绝访问'],
-        404: ['path', '路径不存在（检查 /mcp 是否正确）'],
-        405: ['path', '方法不被允许（该端点只接受 POST）'],
+        404: ['path', '这个路径下没有 MCP 服务（多数端点是 /mcp，少数是 /sse）'],
+        // 我们发的就是 POST，405 只能说明「它不接受 POST」——多半是网页或只认 GET 的接口。
+        405: ['path', webPage
+          ? '这个地址是个网页，不接受 MCP 握手。'
+          : '这个地址不接受 POST，多半不是 MCP 端点。'],
         406: ['accept', '对端要求 Accept 同时包含 application/json 和 text/event-stream'],
         429: ['rate', '请求过于频繁'],
       };
       const [kind, msg] = map[res.status] || ['http', `HTTP ${res.status}`];
-      throw new McpError(kind, msg, { status: res.status, sample });
+      throw new McpError(kind, msg, { status: res.status, sample, url: this.url, landed, looksHtml });
     }
 
     const payload = await readRpcPayload(res);

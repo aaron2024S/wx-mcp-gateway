@@ -347,7 +347,17 @@ function hintFor(e) {
     case 'dns': return '容器名解析不了。确认它和网关在同一个 docker network，地址里别写 localhost。';
     case 'refused': return '端口没开或服务没起。检查端口是不是容器内端口（不是映射到宿主机的那个）。';
     case 'auth': return '令牌无效或过期。去应用的「Agent 接入」里重新生成一个。';
-    case 'path': return '路径不对。多数 MCP 端点是 /mcp，少数是 /sse，先用 curl -i 看一眼。';
+    case 'path': {
+      // 落在网页上（被重定向或回 HTML）≠ 路径写错，这两类的下一步完全不同，
+      // 混成一句「路径不对」会让人一直在地址后面加 /mcp 试。
+      const d = e.detail || {};
+      if (d.landed || d.looksHtml) {
+        const where = d.landed ? `被重定向到 ${d.landed}，` : '';
+        return `这个地址是网页，不是 MCP 服务（${where}只认 GET）。管理后台、网盘首页这类地址填进来都会这样：`
+          + '要先去那个应用的设置里开启 MCP，拿它给出的完整地址（通常带 /mcp）和令牌。';
+      }
+      return '路径不对。多数 MCP 端点是 /mcp，少数是 /sse，先用 curl -i 看一眼。';
+    }
     case 'accept': return '对端要求 Accept 头同时带 application/json 和 text/event-stream——网关已处理，出现这条说明对端实现比较特殊。';
     case 'timeout': return '连不上或者太慢。确认目标可达：从网关容器里执行 curl <地址>。';
     case 'protocol': return '对端不是标准 MCP，或者握手版本不兼容。';
