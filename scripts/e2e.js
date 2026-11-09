@@ -120,6 +120,31 @@ function mockMcp() {
             }],
           });
         }
+        if (name === 'search_messages') {
+          // 复刻 11-09 那个场景：按「旅游」只搜到 1 封，用户接着说「总结一下大概内容」
+          return reply({
+            content: [{
+              type: 'text',
+              text: JSON.stringify({
+                total: 1,
+                messages: [{
+                  uid: 201, subject: '旅游合同签订成功通知', account: 'QQ邮箱', folder: 'INBOX',
+                  from: { name: '全国旅游监管服务平台' }, date: '2026-09-21T12:12:00Z', seen: false,
+                }],
+              }),
+            }],
+          });
+        }
+        if (name === 'read_message') {
+          return reply({
+            content: [{
+              type: 'text',
+              text: '主题：旅游合同签订成功通知\n发件人：全国旅游监管服务平台\n时间：2026-09-21\n\n'
+                + '您与全国旅游监管服务平台签署了一份《境内旅游合同》，行程 10 月 1 日出发，'
+                + '请在出发前 3 天确认集合时间，逾期未确认视为放弃。',
+            }],
+          });
+        }
         return reply({ content: [{ type: 'text', text: `已执行 ${name}` }] });
       }
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -197,7 +222,7 @@ function mockIlink() {
 // 只为了让「via=llm + token 用量」这条路径能被真正跑一遍：
 // 不接真 API，也就不会因为没 key 而让这一段永远没人测。
 
-function mockLlm() {
+function mockLlm(opts = {}) {
   const seen = [];
   const server = http.createServer((req, res) => {
     let buf = '';
@@ -205,6 +230,17 @@ function mockLlm() {
     req.on('end', () => {
       const body = JSON.parse(buf || '{}');
       seen.push({ path: req.url, body });
+      // 不带 tools = 纯生成请求（「把这段内容说成人话」那种）。真实端点这时
+      // 会回 content，不会回 tool_calls——假端点也得照这个行为来，否则摘要那条
+      // 路径在测试里永远是"AI 没给出内容"，等于没测。
+      if (!Array.isArray(body.tools) || !body.tools.length) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          choices: [{ message: { role: 'assistant', content: opts.text || '要点：这是一封旅游合同签订成功的通知，10 月 1 日出发，出发前 3 天要确认集合时间。' } }],
+          usage: { prompt_tokens: 500, completion_tokens: 60, total_tokens: 560 },
+        }));
+        return;
+      }
       // 像 DeepSeek / OpenAI 那样校验 function name 的字符集。
       // 名字转义一旦坏掉（我们内部用的是「应用.工具」，点号不合法），
       // 这里立刻 400 —— 而不是等用户点「试一句」才发现 AI 根本没通。
@@ -216,14 +252,17 @@ function mockLlm() {
         return;
       }
       // 模型只会从发给它的清单里挑，且报回来的是转义后的名字
-      const pick = names.find((n) => /list_messages/.test(n)) || names[0] || 'list_messages';
+      const want = opts.pick ? opts.pick(body) : null;
+      const pick = want
+        ? (names.find((n) => n === want || n.endsWith(`_${want}`)) || want)
+        : (names.find((n) => /list_messages/.test(n)) || names[0] || 'list_messages');
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
         choices: [{
           message: {
             role: 'assistant',
             content: null,
-            tool_calls: [{ id: 'c1', type: 'function', function: { name: pick, arguments: '{}' } }],
+            tool_calls: [{ id: 'c1', type: 'function', function: { name: pick, arguments: opts.args || '{}' } }],
           },
         }],
         usage: { prompt_tokens: 812, completion_tokens: 43, total_tokens: 855 },
@@ -234,6 +273,7 @@ function mockLlm() {
     server,
     seen,
     url: `http://127.0.0.1:${server.address().port}/v1`,
+    close: () => server.close(),
   })));
 }
 
@@ -770,6 +810,100 @@ async function main() {
     // 单独的回车符在微信里会把同一行反复覆盖，看起来像乱码
     const cr = renderResult({ title: '读取邮件正文' }, { text: '主题：A\r发件人：B\r\n正文：C' });
     ok('回车统一成换行', !cr.text.includes('\r') && cr.text.split('\n').length >= 3, JSON.stringify(cr.text));
+  }
+
+  console.log('\n=== ④m 连续对话：上一轮的结果要接得住 ===');
+  {
+    // 2026-11-09 用户的真实截图：先搜到 1 封旅游邮件，接着说「总结一下大概内容」，
+    // 网关却回了 20 封无关邮件。根因是每句话都被当成孤立请求——识别层只收到这一句，
+    // 模型完全不知道上一轮发生过什么，只能把「内容」理解成"再列一遍邮件"。
+    EXTRA_TOOLS.push(
+      {
+        name: 'search_messages',
+        title: '搜索邮件',
+        description: '按关键词搜索邮件',
+        inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
+        annotations: { readOnlyHint: true },
+      },
+      {
+        name: 'read_message',
+        title: '读取邮件正文',
+        description: '读取某一封邮件的正文',
+        inputSchema: { type: 'object', properties: { uid: { type: 'number' }, account: { type: 'string' } }, required: ['uid'] },
+        annotations: { readOnlyHint: true },
+      },
+    );
+    await registry.refreshAll();
+
+    const llm = await mockLlm({ pick: () => 'search_messages', args: JSON.stringify({ query: '旅游' }) });
+    config.llm = {
+      enabled: true, default: 'mock', timeout: 5, max_tokens: 256,
+      providers: { mock: { type: 'openai', base_url: llm.url, model: 'deepseek-flash', api_key: 'k' } },
+    };
+    config.routing.llm_when = 'miss';
+
+    outbox.length = 0;
+    calls.length = 0;
+    il.push({ from_user_id: 'wxid_me', context_token: 'CTX-D1', msg_id: 'mD1', item_list: [{ type: 1, text_item: { text: '帮我找一封有关旅游的邮件' } }] });
+    for (let i = 0; i < 40 && !outbox.length; i++) await sleep(100);
+    ok('第一轮搜到那封旅游邮件', /旅游合同/.test(outbox[0] || ''), outbox[0]);
+
+    // 第二轮：这句话自己没有对象，全部信息都在上一轮里
+    outbox.length = 0;
+    calls.length = 0;
+    il.push({ from_user_id: 'wxid_me', context_token: 'CTX-D2', msg_id: 'mD2', item_list: [{ type: 1, text_item: { text: '总结一下大概内容' } }] });
+    for (let i = 0; i < 60 && !outbox.length; i++) await sleep(100);
+
+    const called = calls.map((c) => c.name);
+    ok('接的是上一轮那一封，不是把清单又列一遍',
+      called.includes('read_message') && !called.includes('list_messages'), JSON.stringify(called));
+    const readArg = calls.find((c) => c.name === 'read_message')?.args || {};
+    ok('上一轮的 uid 被带过来了', readArg.uid === 201, JSON.stringify(readArg));
+    ok('给的是摘要，不是整篇原文',
+      /要点/.test(outbox.at(-1) || '') && !/逾期未确认视为放弃/.test(outbox.at(-1) || ''), outbox.at(-1));
+
+    // 第三轮：换一句需要重新选工具的话。历史必须一起发给模型，
+    // 否则它还是会像第一次那样凭空猜。
+    llm.seen.length = 0;
+    outbox.length = 0;
+    il.push({ from_user_id: 'wxid_me', context_token: 'CTX-D3', msg_id: 'mD3', item_list: [{ type: 1, text_item: { text: '那封邮件是几号发的' } }] });
+    for (let i = 0; i < 60 && !outbox.length; i++) await sleep(100);
+
+    const routed = llm.seen.filter((s) => Array.isArray(s.body?.tools) && s.body.tools.length);
+    const msgs = routed.at(-1)?.body?.messages || [];
+    ok('发给 AI 的消息里带着前几轮',
+      msgs.some((m) => m.role === 'assistant' && /旅游合同|要点/.test(m.content || '')),
+      JSON.stringify(msgs.map((m) => `${m.role}:${String(m.content).slice(0, 12)}`)));
+    ok('用户原话也还在（模型才知道「那封」指哪封）',
+      msgs.some((m) => m.role === 'user' && /有关旅游的邮件/.test(m.content || '')),
+      JSON.stringify(msgs.map((m) => m.role)));
+
+    // 上一轮列了好几条时就猜不出来是哪条了——该问，不该随便挑一条。
+    // 而且用户回序号之后要记得"这次是要摘要"，读正文后概括，不是原样贴出来。
+    const agD = new Agent({ registry, config, sessions: new SessionStore({ log, confirmTtl: 60 }), log, hooks: {} });
+    const sentD = [];
+    agD.hooks = { send: async (_c, t) => { sentD.push(t); } };
+    let pickedD = null;
+    agD._run = async (_c, k, a, _t, _ctx, meta) => { pickedD = { k, a, meta }; return { handled: true }; };
+    agD.sessions.setLastList('d1', [
+      { label: 'A', argKey: 'uid', value: 1 },
+      { label: 'B', argKey: 'uid', value: 2 },
+    ], 'mail.search_messages');
+    agD.sessions.pushTurn('d1', { user: '列一下未读', toolTitle: '列出邮件', result: '共 2 条', kind: 'list' });
+
+    await agD.handle({ chatId: 'd1', text: '总结一下大概内容', contextToken: 'X' });
+    ok('上一轮有多条时会问要总结哪一条', /要总结哪一条/.test(sentD.at(-1) || ''), sentD.at(-1));
+
+    await agD.handle({ chatId: 'd1', text: '2', contextToken: 'X' });
+    ok('回序号后读第 2 条，并且带着摘要意图',
+      pickedD?.a?.uid === 2 && pickedD?.meta?.digest === true,
+      JSON.stringify({ a: pickedD?.a, digest: pickedD?.meta?.digest }));
+
+    // 复原，别把额外工具留给后面的用例
+    EXTRA_TOOLS.length = 0;
+    config.llm = { enabled: false, providers: {} };
+    await registry.refreshAll();
+    await new Promise((r) => llm.server.close(r));
   }
 
   console.log('\n=== ⑤ 重投去重 ===');

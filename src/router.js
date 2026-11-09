@@ -19,12 +19,12 @@ function needLLM(mode, local) {
   }
 }
 
-async function tryLLM(text, registry, config, local) {
+async function tryLLM(text, registry, config, local, history) {
   const tools = registry.llmTools(local.appId || null);
   if (!tools.length) return { kind: 'none', error: '当前没有可用的工具（应用都离线？）' };
 
   try {
-    const r = await routeWithLLM({ text, tools, config });
+    const r = await routeWithLLM({ text, tools, config, history });
     if (!r.tool) {
       // 模型决定不调工具，只回了句话
       return r.text
@@ -76,7 +76,7 @@ export function llmState(config) {
  *   say:  {text, via}
  *   menu: {candidates, note?}
  */
-export async function route(text, { registry, config }) {
+export async function route(text, { registry, config, history = [] }) {
   const local = registry.match(text);
   const st = llmState(config);
   const llmOn = st.on;
@@ -84,7 +84,7 @@ export async function route(text, { registry, config }) {
 
   // ① AI 优先模式：先问 AI，失败再回落本地
   if (llmOn && mode === 'always') {
-    const r = await tryLLM(text, registry, config, local);
+    const r = await tryLLM(text, registry, config, local, history);
     if (r.kind === 'call' || r.kind === 'say') return r;
     // 回落也要留下证据：用户开了「总是问 AI」却看到日志写"本地"，不给原因就没法查。
     if (local.confident) {
@@ -114,7 +114,7 @@ export async function route(text, { registry, config }) {
 
   // ③ 本地不自信（或命中但有歧义），看配置要不要问 AI
   if (llmOn && (askBecauseAmbiguous || needLLM(mode, local))) {
-    const r = await tryLLM(text, registry, config, local);
+    const r = await tryLLM(text, registry, config, local, history);
     if (r.kind === 'call' || r.kind === 'say') return r;
     // AI 失败。两种回落策略：
     //   local —— 用本地索引的结果（有候选就给候选，没候选给全量）

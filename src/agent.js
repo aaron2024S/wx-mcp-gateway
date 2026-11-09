@@ -8,10 +8,23 @@
 
 import { route, renderMenu } from './router.js';
 import { checkRisk, missingArgs, describeParam, coerceArg, parseInlineArgs, prepareArgs, mergeArgs, runTool, renderResult, riskLabel } from './exec.js';
+import { chatOnce } from './llm.js';
 import { isYes, isNo, parseOrdinal } from './session.js';
 
 const MAX_INPUT = 2000;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// 「把这封大概讲讲」——短句 + 总结类动词。只在上一轮有结果时才起作用，
+// 目的是别让这句话被当成一个新请求重新列一遍清单（2026-11-09 实测：
+// 用户搜到 1 封旅游邮件后说「总结一下大概内容」，网关回了他 20 封无关邮件）。
+const DIGEST_RE = /总结|概括|归纳|摘要|提炼|要点|大概(内容|意思|讲)|讲的?什么|讲一下|讲讲|说说|简单说/;
+
+// 摘要提示词。刻意压着不让它发挥：用户在微信里要的是"这封讲了什么"，
+// 不是一篇读后感；带 markdown 星号在微信里会原样显示成一堆星号。
+const DIGEST_PROMPT = `你在微信里帮用户看一封邮件或一条查询结果，请用 3 到 5 句中文说清要点：
+谁发来的、讲的是什么事、要不要用户做什么、有没有时间或金额这类关键信息。
+不要复述原文、不要逐行翻译、不要用 markdown、不要加「总结：」这样的前缀。
+如果内容里没什么实质信息，就直接说「这封没什么实质内容」。`;
 
 // 识别方式与 AI 用量要跟着「这个工具是怎么被选中的」一路带到落盘那一行。
 // 中途会经过「补参数」「二次确认」两个异步跳，meta 必须跟着 pending 一起存，
@@ -62,9 +75,20 @@ export class Agent {
     return s.slice(0, MAX_INPUT);
   }
 
+  // 「总结一下」「大概讲什么」这类话本身没有对象，全靠上一轮。
+  // 只认短句：长句里夹着总结（「把这封总结一下发给张三」）是另一件事，别拦。
+  static asksForDigest(text) {
+    const s = String(text || '').trim();
+    if (!s || s.length > 24) return false;
+    return DIGEST_RE.test(s);
+  }
+
   async handle({ chatId, text, contextToken, trigger = 'wechat' }) {
     const raw = Agent.clean(text);
     if (!raw) return;
+    // 记下这句话。执行层是异步的（慢操作还会先回执），等结果出来时再回头找原话
+    // 就找不到了——而历史里缺了「用户到底问了什么」，下一轮就没法接。
+    this.sessions.get(chatId).lastUser = raw;
 
     const say = async (t) => {
       await this.hooks.send(chatId, t, contextToken);
@@ -124,12 +148,49 @@ export class Agent {
     // ③ 引用上一轮列表：「1」「第2条」
     const ref = this.sessions.pickFromLastList(chatId, raw);
     if (ref) {
-      const r = await this._openListItem(chatId, ref, trigger, contextToken);
+      // 上一句是「总结一下」，这里回的序号就是"要总结哪一条"
+      const st = this.sessions.get(chatId);
+      const wantDigest = !!st.digestNext && Date.now() - st.digestNext.at < 120_000;
+      st.digestNext = null;
+      const r = await this._openListItem(chatId, ref, trigger, contextToken, wantDigest ? { digest: true } : {});
       if (r) return r;
     }
 
-    // ④ 识别
-    const decision = await route(raw, { registry: this.registry, config: this.config });
+    // ③b 承接上一轮：「总结一下」「大概讲什么」。
+    //
+    // 这类话没有自己的对象，全部信息都在上一轮里。交给识别层等于让它凭空猜——
+    // 2026-11-09 实测就是在这里出的错：上一轮搜到 1 封旅游邮件，这句「总结一下
+    // 大概内容」被理解成"再列一遍邮件"，回了 20 封完全无关的。
+    // 上一轮只有一条结果时，指的就是它；直接读它、再让人话摘要。
+    if (Agent.asksForDigest(raw) && this.sessions.turnsOf(chatId).length) {
+      const st = this.sessions.get(chatId);
+      const items = st.lastList?.items || [];
+      if (items.length === 1) {
+        const r = await this._openListItem(chatId, items[0], trigger, contextToken, { digest: true });
+        if (r) return r;
+      } else if (items.length > 1) {
+        // 上一轮列了好几条，猜不出是哪条——问一句，别自作主张。
+        // 记住"这次是要摘要"，用户回「1」时就知道该读正文再概括，而不是原样贴出来。
+        st.digestNext = { at: Date.now() };
+        return say(`要总结哪一条？回序号就行（1-${items.length}）。`);
+      }
+      // 上一轮本身就是一段文本（正文、执行结果），没有列表可指——直接摘要它
+      const last = this.sessions.turnsOf(chatId).at(-1);
+      if (!items.length && last?.kind === 'text' && last.result) {
+        const d = await this._digest(last.result);
+        if (d?.text) {
+          await this.hooks.send(chatId, d.text, contextToken);
+          this.sessions.pushTurn(chatId, {
+            user: raw, toolTitle: last.toolTitle, args: last.args, result: d.text, kind: 'text',
+          });
+          return { handled: true };
+        }
+      }
+    }
+
+    // ④ 识别（带上最近几轮，模型才知道「总结一下」指的是什么）
+    const history = this._history(chatId);
+    const decision = await route(raw, { registry: this.registry, config: this.config, history });
 
     if (decision.kind === 'say') return say(decision.text);
     if (decision.kind === 'call') {
@@ -296,11 +357,22 @@ export class Agent {
       this.sessions.setLastList(chatId, rendered.items, tool.key);
     }
 
-    const header = slow
-      ? `「${tool.title || tool.name}」完成（${Date.now() - started} ms）\n`
-      : '';
-    await this.hooks.send(chatId, header + rendered.text, contextToken);
+    // 「总结一下」：拿到正文后让人话摘要，替换掉那一大段原文。
+    // 只在没有列表项时才做——列了 8 条邮件再做摘要，等于把清单吞掉。
+    // 摘要失败就照原文发，绝不因为 AI 挂了让用户什么都看不到。
+    let out = rendered.text;
+    if (meta.digest && !rendered.items?.length) {
+      const d = await this._digest(rendered.text);
+      if (d?.text) {
+        out = d.text;
+        // 摘要本身也是一次 AI 调用，token 要算进这一轮——否则日志里这行
+        // 显示"没花 token"，用户会以为摘要不要钱。
+        meta = { ...meta, usage: d.usage || null, provider: meta.provider || d.provider, model: meta.model || d.model };
+      }
+    }
 
+    // 审计与历史都在推送之前落定。反过来的话，「结果已发出」和「记录已写好」
+    // 之间有一个 await 的窗口，看日志的人（和测试）会读到上一条。
     this._logCall({
       trigger,
       tool,
@@ -310,11 +382,34 @@ export class Agent {
       err: res.isError ? String(res.text || '').slice(0, 120) : null,
       ...metaFields(meta),
     });
+
+    // 记一轮对话。存的是**给用户看的那份**（可能是摘要），下一轮接话时
+    // 模型看到的就是用户此刻看到的东西，两边不会对不上。
+    //
+    // 「确认」「1」这类回话本身没有信息量，记进历史只会让下一轮模型看不懂
+    // 上下文，所以沿用上一条真正说事的话。
+    try {
+      const said = this.sessions.get(chatId).lastUser || '';
+      const prev = this.sessions.turnsOf(chatId).at(-1);
+      const bare = isYes(said) || isNo(said) || parseOrdinal(said) !== null;
+      this.sessions.pushTurn(chatId, {
+        user: bare && prev?.user ? prev.user : said,
+        toolTitle: tool.title || tool.name,
+        args: argv,
+        result: out,
+        kind: rendered.items?.length ? 'list' : 'text',
+      });
+    } catch { /* 记历史失败不影响这次结果 */ }
+
+    const header = slow
+      ? `「${tool.title || tool.name}」完成（${Date.now() - started} ms）\n`
+      : '';
+    await this.hooks.send(chatId, header + out, contextToken);
     return { handled: true };
   }
 
   // 「1」→ 用上一轮的 id 调"详情类"工具
-  _openListItem(chatId, ref, trigger, contextToken) {
+  _openListItem(chatId, ref, trigger, contextToken, extraMeta = {}) {
     const listToolKey = this.sessions.get(chatId).lastList?.toolKey;
     if (!listToolKey) return null;
     const listTool = this.registry.find(listToolKey);
@@ -356,7 +451,47 @@ export class Agent {
       if (k in props) extra[k] = v;
     }
     const args = { ...extra, [primary]: ref.value };
-    return this._run(chatId, detail.key, args, trigger, contextToken, { via: 'ref' }).then(() => ({ handled: true }));
+    return this._run(chatId, detail.key, args, trigger, contextToken, { via: 'ref', ...extraMeta })
+      .then(() => ({ handled: true }));
+  }
+
+  // 最近几轮对话，交给识别层。原话 + 工具 + 结果开头一截。
+  // 参数也带上：模型知道上一轮是按「旅游」搜的，这句「再搜搜合同」才知道往哪加词。
+  _history(chatId) {
+    const turns = this.sessions.turnsOf(chatId);
+    const out = [];
+    for (const t of turns) {
+      out.push({ role: 'user', content: String(t.user || '') });
+      const args = t.args && Object.keys(t.args).length ? `，参数 ${JSON.stringify(t.args).slice(0, 160)}` : '';
+      const did = t.toolTitle ? `（调用了「${t.toolTitle}」${args}）` : '';
+      out.push({
+        role: 'assistant',
+        content: `${did}\n结果：${String(t.result || '').slice(0, 700)}`.trim(),
+      });
+    }
+    return out;
+  }
+
+  // 把一段结果说成人话。失败返回 null，调用方照原样发。
+  async _digest(content) {
+    if (!this.config.llm?.enabled) return null;
+    const text = String(content || '').trim();
+    if (!text) return null;
+    try {
+      const r = await chatOnce({
+        config: this.config,
+        maxTokens: Math.min(Number(this.config.llm.max_tokens) || 400, 800),
+        messages: [
+          { role: 'system', content: DIGEST_PROMPT },
+          { role: 'user', content: text.slice(0, 4000) },
+        ],
+      });
+      const out = String(r.text || '').trim();
+      return out ? { text: out, usage: r.usage || null, provider: r.provider, model: r.model } : null;
+    } catch (e) {
+      this.log?.warn?.('digest', `摘要没做出来，按原文发：${e?.message || e}`);
+      return null;
+    }
   }
 
   _logCall(rec) {

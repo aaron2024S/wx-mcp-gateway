@@ -22,7 +22,10 @@ const SYSTEM_PROMPT = `你是一个指令路由器。用户会用中文说一句
    用户没说的不要猜、不要编默认值。
 4. 不要解释、不要道歉、不要输出额外文字，只调用工具。
 5. 工具描述里点名了某类问法的，按描述选；两个都能答时，选能直接给出用户要看的东西的那个——
-   要看明细就别选只给统计数字的（统计完还得再查一次，用户只能干等）。`;
+   要看明细就别选只给统计数字的（统计完还得再查一次，用户只能干等）。
+6. 这是连续对话，前面几轮会一起给你。用户这句话可能是在接着说上一轮的事
+   （「总结一下」「这个」「那封」「再详细点」「换成英文」）。接着上一轮的对象做，
+   不要当成新请求重新列一遍。要看上一轮某一条的内容，就选那个"读详情/读正文"的工具。`;
 
 export class LlmError extends Error {
   constructor(kind, message, detail) {
@@ -183,8 +186,28 @@ function cleanSchema(s) {
   return out;
 }
 
+// 把「前几轮发生了什么」拼成对话消息。
+//
+// 只给一句话的摘要，不给完整结果，也不给工具 schema：模型需要知道的只是
+// 「刚才问了旅游邮件，回了一条『旅游合同签订成功通知』」——够了就能接上话，
+// 给太多反而把这一句真正的意图淹掉，还白烧 token。
+function historyMessages(history) {
+  const out = [];
+  for (const h of Array.isArray(history) ? history : []) {
+    const role = h?.role === 'assistant' ? 'assistant' : 'user';
+    const content = String(h?.content ?? '').trim().slice(0, 1000);
+    if (!content) continue;
+    const last = out[out.length - 1];
+    // Anthropic 严格要求 user / assistant 交替，相邻同角色先合并；
+    // OpenAI 侧合并也完全没问题。
+    if (last && last.role === role) last.content += '\n' + content;
+    else out.push({ role, content });
+  }
+  return out;
+}
+
 // ---------- OpenAI 兼容 ----------
-async function callOpenAI(text, tools, p, timeoutMs, maxTokens) {
+async function callOpenAI(text, tools, p, timeoutMs, maxTokens, history) {
   const headers = { ...p.headers };
   if (p.api_key) headers.Authorization = `Bearer ${p.api_key}`;
 
@@ -192,6 +215,7 @@ async function callOpenAI(text, tools, p, timeoutMs, maxTokens) {
     model: p.model,
     messages: [
       { role: 'system', content: SYSTEM_PROMPT },
+      ...historyMessages(history),
       { role: 'user', content: text },
     ],
     tools: tools.map((t) => ({
@@ -234,7 +258,7 @@ async function callOpenAI(text, tools, p, timeoutMs, maxTokens) {
 }
 
 // ---------- Anthropic ----------
-async function callAnthropic(text, tools, p, timeoutMs, maxTokens) {
+async function callAnthropic(text, tools, p, timeoutMs, maxTokens, history) {
   const headers = {
     'x-api-key': p.api_key,
     'anthropic-version': '2023-06-01',
@@ -244,7 +268,7 @@ async function callAnthropic(text, tools, p, timeoutMs, maxTokens) {
     model: p.model,
     max_tokens: maxTokens,
     system: SYSTEM_PROMPT,
-    messages: [{ role: 'user', content: text }],
+    messages: [...historyMessages(history), { role: 'user', content: text }],
     tools: tools.map((t) => ({
       name: t.name,
       description: t.description,
@@ -294,7 +318,7 @@ function candidates(cfg, preferred) {
  * 让 AI 选一个工具。失败会按 fallback 链换下一家；全挂了抛 LlmError。
  * @returns {{tool:string|null, args:object, via:'llm', provider:string, model:string, ms:number, usage:object|null, text:string}}
  */
-export async function routeWithLLM({ text, tools, config, providerId }) {
+export async function routeWithLLM({ text, tools, config, providerId, history }) {
   if (!config.llm?.enabled) throw new LlmError('config', 'AI 路由未启用');
   if (!tools.length) throw new LlmError('config', '没有可用的工具');
 
@@ -314,7 +338,7 @@ export async function routeWithLLM({ text, tools, config, providerId }) {
     if (!adapter) { failures.push(`${p.id}: 不支持的协议 ${p.type}`); continue; }
     const started = Date.now();
     try {
-      const r = await adapter(text, prepared.wire, p, timeoutMs, maxTokens);
+      const r = await adapter(text, prepared.wire, p, timeoutMs, maxTokens, history);
       return {
         tool: unwireName(prepared.back, r.tool),
         args: r.args || {},
@@ -334,6 +358,47 @@ export async function routeWithLLM({ text, tools, config, providerId }) {
   // 上层才能给出「是超时还是 key 错了」这种能指导排查的提示
   if (errors.length === 1) throw errors[0];
   throw new LlmError('http', `所有 AI 服务商都失败了：${failures.join('；')}`, { failures });
+}
+
+// 只用来「把一段内容说成人话」——例如读完一整封信之后给个摘要。
+// 不做工具选择，也不带 tools 参数。
+// 失败一律抛给调用方：摘要只是锦上添花，绝不该让用户因此看不到东西。
+export async function chatOnce({ messages, config, maxTokens = 400, providerId = null }) {
+  const list = candidates(config, providerId);
+  if (!list.length) throw new LlmError('config', '没有可用的 AI 服务商');
+
+  const timeoutMs = (config.llm?.timeout || 15) * 1000;
+  let lastErr = null;
+
+  for (const p of list) {
+    const base = String(p.base_url || '').trim().replace(/\/+$/, '');
+    if (!base) { lastErr = new LlmError('config', `${p.id}: 没填接口地址`); continue; }
+    const anthropic = p.type === 'anthropic';
+    const headers = anthropic
+      ? { 'x-api-key': p.api_key, 'anthropic-version': '2023-06-01', ...p.headers }
+      : { ...p.headers, ...(p.api_key ? { Authorization: `Bearer ${p.api_key}` } : {}) };
+
+    try {
+      if (anthropic) {
+        const sys = messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n');
+        const rest = messages.filter((m) => m.role !== 'system');
+        const json = await post(`${base}/v1/messages`, headers, {
+          model: p.model, max_tokens: maxTokens, temperature: 0.3,
+          ...(sys ? { system: sys } : {}), messages: rest,
+        }, timeoutMs);
+        const text = (json?.content || []).filter((b) => b?.type === 'text').map((b) => b.text).join('\n');
+        return { text, provider: p.id, model: p.model, usage: normalizeUsage(json?.usage) };
+      }
+      const json = await post(`${base}/chat/completions`, headers, {
+        model: p.model, messages, temperature: 0.3, max_tokens: maxTokens,
+      }, timeoutMs);
+      const text = json?.choices?.[0]?.message?.content || '';
+      return { text, provider: p.id, model: p.model, usage: normalizeUsage(json?.usage) };
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr || new LlmError('http', 'AI 没有给出内容');
 }
 
 // 配置页用：列出可选服务商（不含密钥）

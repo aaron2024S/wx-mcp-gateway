@@ -9,6 +9,12 @@
 //   args    —— 参数没给全，正在一项项问
 //
 // 另有 lastList：记住上一轮列表的每一项对应哪个 id，供"1"、"第 2 封"这类引用。
+// 以及 turns：最近几轮"用户说了什么 / 调了哪个工具 / 回了什么"，交给识别层当上下文。
+// 没有这个，微信里每句话都是孤立的——「总结一下大概内容」会被当成一个全新的请求。
+
+// 留几轮：微信里「总结一下」→「再详细点」→「翻成英文」能连着追三层就够用了，
+// 再往上翻只会把无关的旧话题也塞给模型，反而更容易跑偏。
+const MAX_TURNS = 3;
 
 const DEFAULT_TTL = {
   confirm: 60_000,   // 由 config.gateway.confirm_ttl 覆盖
@@ -31,7 +37,7 @@ export class SessionStore {
   get(chatId) {
     let s = this.map.get(chatId);
     if (!s) {
-      s = { chatId, pending: null, lastList: null, lastTool: null, turns: 0, lastAt: Date.now() };
+      s = { chatId, pending: null, lastList: null, lastTool: null, turns: [], lastAt: Date.now() };
       this.map.set(chatId, s);
     }
     return s;
@@ -75,6 +81,25 @@ export class SessionStore {
     if (n === null) return null;
     const item = s.lastList.items[n - 1];
     return item || null;
+  }
+
+  // 记一轮对话。只留能读懂的最小信息：原话、工具、结果开头一截。
+  // 不存完整结果——正文动辄几十 KB，存下来会把内存和 token 都撑爆。
+  pushTurn(chatId, turn) {
+    const s = this.get(chatId);
+    const list = Array.isArray(s.turns) ? s.turns : (s.turns = []);
+    list.push({ ...turn, at: Date.now() });
+    if (list.length > MAX_TURNS) list.splice(0, list.length - MAX_TURNS);
+    s.lastAt = Date.now();
+    return list;
+  }
+
+  // 供识别层使用的历史。超过 TTL 的丢掉——否则一小时前那句「总结一下」
+  // 会把现在完全无关的请求带偏。
+  turnsOf(chatId, { ttl = 10 * 60_000 } = {}) {
+    const s = this.get(chatId);
+    const list = Array.isArray(s.turns) ? s.turns : [];
+    return list.filter((t) => Date.now() - t.at <= ttl);
   }
 
   reset(chatId) {
