@@ -119,6 +119,11 @@
     font-size:11.5px; color:var(--text-dim);
     background:var(--surface-3); padding:1px 6px; border-radius:4px;
     display:inline-block; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+    /* overflow 不是 visible 时，inline-block 的基线会退化成「盒子底边」，
+       盒子于是整体坐在文字基线上，看着比周围字偏下（tools/list、mail.list_messages 就是这个症状）。
+       改成按中线对齐，并固定行高，免得 1px 纵向内边距把整行撑高。
+       表格单元格、flex 子项里的 .mono 不受影响——那里 vertical-align 本来就不生效。 */
+    vertical-align:middle; line-height:1.45;
   }
   .app-meta{
     display:flex; align-items:center; gap:10px; margin-top:12px; padding-top:12px;
