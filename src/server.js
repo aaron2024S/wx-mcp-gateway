@@ -19,7 +19,7 @@ import { SessionStore } from './session.js';
 import { Agent } from './agent.js';
 import { IlinkClient, DEFAULT_BASE } from './ilink.js';
 import { checkRisk, runTool, renderResult, riskLabel } from './exec.js';
-import { routeWithLLM } from './llm.js';
+import { routeWithLLM, listModels } from './llm.js';
 import {
   Auth, AuthError, COOKIE_NAME, MIN_PASSWORD,
   MAX_FAILURES, TTL_KEEP_MS, lockedHint,
@@ -415,6 +415,23 @@ const ROUTES = [
     appStore.removeProvider(m[1]);
     applySettings();
     return { ok: true };
+  }],
+
+  // 服务商支持哪些模型，让它自己报。模型名比代码过期得快，
+  // 界面上的「拉取列表」走这条，别再靠预设里猜。
+  ['POST', /^\/api\/providers\/models$/, async (req) => {
+    const body = await readBody(req);
+    const id = String(body.id || '').trim();
+    try {
+      const models = await listModels({
+        type: body.type === 'anthropic' ? 'anthropic' : 'openai',
+        base_url: body.base_url,
+        api_key: body.api_key || config.llm.providers[id]?.api_key || '',
+      });
+      return { ok: true, models };
+    } catch (e) {
+      return { ok: false, message: errText(e) };
+    }
   }],
 
   // 真发一次请求验证 provider 能用。比"保存成功"有用得多——

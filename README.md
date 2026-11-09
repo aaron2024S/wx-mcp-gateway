@@ -346,8 +346,10 @@ Node ≥ 20。
 | 标识 | 自己起的名，字母数字下划线短横线 | `my-llm` |
 | 协议 | 绝大多数选「OpenAI 兼容」 | `openai` |
 | 接口地址 | 厂商给的基础地址，**要含 `/v1` 这种版本段，不要带 `/chat/completions`** | `https://api.example.com/v1` |
-| 模型 | 厂商文档里的模型名 | 看厂商文档 |
+| 模型 | 点「拉取列表」按地址和 Key 问服务商要一份，再挑；也可手输 | `deepseek-flash` |
 | API Key | 没有鉴权的本地服务留空 | `sk-...` |
+
+模型名是这一块最容易踩的坑：厂商迭代时常直接改名或下线旧名，比如 DeepSeek 的 `deepseek-chat` / `deepseek-reasoner` 已于 2026-07 退役，现在只有 `deepseek-flash` 和 `deepseek-v4-pro`。**所以模型那一行别照抄老教程，点「拉取列表」让端点自己把能用的名字报回来**——它走的是标准的 `GET /models`（Claude 走 `/v1/models`），已经存过 Key 的不必重填。
 
 地址填错、模型名不存在、key 无效，都点一次「测试」就能看出来，不用先保存再试。要让 AI 真正参与路由，还得把上面的「启用 AI 兜底」打开。
 
@@ -403,7 +405,7 @@ Node ≥ 20。
 ```bash
 npm test           # 端到端：假 iLink 网关 + 假 MCP，62 项断言
 npm run test:auth  # 登录：起真服务走完设密码→登录→改密→锁定，49 项断言
-npm run test:llm   # AI 路由层：假 OpenAI/Anthropic 端点，22 项断言
+npm run test:llm   # AI 路由层：假 OpenAI/Anthropic 端点 + 模型清单，26 项断言
 npm run test:store # 配置合并：三层覆盖顺序 + 凭据不外泄，33 项断言
 npm run demo       # 拉起真的 MailNest 跑一遍中文匹配
 ```

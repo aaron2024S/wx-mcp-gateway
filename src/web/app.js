@@ -679,7 +679,7 @@ async function editApp(id) {
 // 预设只是"填好地址和模型名"的快捷方式，不在表里的厂商选自定义即可。
 // 后端只认两种协议：openai（/chat/completions）与 anthropic（/v1/messages）。
 const PRESETS = {
-  deepseek: { type: 'openai', base_url: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
+  deepseek: { type: 'openai', base_url: 'https://api.deepseek.com/v1', model: 'deepseek-flash' },
   openai: { type: 'openai', base_url: 'https://api.openai.com/v1', model: 'gpt-4o-mini' },
   moonshot: { type: 'openai', base_url: 'https://api.moonshot.cn/v1', model: 'moonshot-v1-8k' },
   dashscope: { type: 'openai', base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus' },
@@ -708,6 +708,9 @@ $('#addProvBtn').onclick = () => {
   $('#pvModel').value = '';
   $('#pvKey').value = '';
   $('#pvResult').textContent = '';
+  $('#pvModelList').innerHTML = '';
+  $('#pvModelHint').style.color = '';
+  $('#pvModelHint').textContent = '模型名会随厂商迭代而过期，填之前点「拉取列表」拿最新的；也可以直接手输。';
   $('#provModal').classList.remove('hidden');
 };
 $('#pvCancel').onclick = () => $('#provModal').classList.add('hidden');
@@ -738,6 +741,42 @@ $('#pvTest').onclick = async () => {
       out.textContent = r.message;
     }
   } catch (e) { out.style.color = 'var(--red)'; out.textContent = e.message; }
+};
+
+// 模型名会过期（DeepSeek 的 deepseek-chat 已退役），所以不靠猜：问端点要清单。
+// 已经存过 key 的不必重填——后端在 api_key 为空时会用保存的那份。
+$('#pvFetchModels').onclick = async () => {
+  const d = provDraft();
+  const btn = $('#pvFetchModels');
+  const hint = $('#pvModelHint');
+  if (!d.base_url) { toast('先填接口地址'); return; }
+  btn.disabled = true;
+  const t0 = btn.textContent;
+  btn.textContent = '拉取中…';
+  try {
+    const r = await api('/api/providers/models', { method: 'POST', body: { id: d.id, type: d.type, base_url: d.base_url, api_key: d.api_key } });
+    if (!r.ok) {
+      hint.style.color = 'var(--red)';
+      hint.textContent = r.message;
+      return;
+    }
+    const list = r.models.slice().sort();
+    $('#pvModelList').innerHTML = list.map((m) => `<option value="${esc(m)}"></option>`).join('');
+    // 没填模型就挑一个能用的兜底：优先 flash / mini / 便宜那类
+    if (!d.model) {
+      const pick = list.find((m) => /flash|mini|lite|turbo|small/i.test(m)) || list[0];
+      $('#pvModel').value = pick;
+    }
+    hint.style.color = 'var(--text-faint)';
+    hint.textContent = `拉到 ${list.length} 个模型，点输入框右侧箭头选；也可以直接手输。`;
+    toast(`共 ${list.length} 个模型`);
+  } catch (e) {
+    hint.style.color = 'var(--red)';
+    hint.textContent = e.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = t0;
+  }
 };
 
 $('#pvSave').onclick = async () => {

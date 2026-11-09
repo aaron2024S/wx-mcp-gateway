@@ -4,7 +4,7 @@
 
 import http from 'node:http';
 import { Registry } from '../src/registry.js';
-import { routeWithLLM, LlmError } from '../src/llm.js';
+import { routeWithLLM, listModels, LlmError } from '../src/llm.js';
 import { route } from '../src/router.js';
 
 const PORT = 3399;
@@ -58,6 +58,22 @@ const mock = http.createServer((req, res) => {
           { type: 'tool_use', id: 'tu_1', name, input: { to: 'a@b.com' } },
         ],
         usage: { input_tokens: 20, output_tokens: 8 },
+      }));
+      return;
+    }
+
+    if (req.url === '/v1/models' || req.url === '/v1/models?limit=100') {
+      // 模型清单：按鉴权头区分协议，顺手验我们发的头对不对
+      if (req.headers.authorization === 'Bearer bad' || req.headers['x-api-key'] === 'bad') {
+        res.statusCode = 401;
+        res.end(JSON.stringify({ error: { message: 'Invalid API key' } }));
+        return;
+      }
+      const isAnthropic = Boolean(req.headers['x-api-key']);
+      res.end(JSON.stringify({
+        data: isAnthropic
+          ? [{ id: 'claude-sonnet-4-5', type: 'model' }]
+          : [{ id: 'deepseek-v4-pro', object: 'model' }, { id: 'deepseek-flash', object: 'model' }],
       }));
       return;
     }
@@ -181,6 +197,29 @@ async function main() {
     cfg.routing.llm_when = 'never';
     const r = await route('把冰箱温度调低', { registry: reg, config: cfg });
     ok('never 模式下不调 AI', r.kind === 'menu' && r.note === '没听懂', String(r.note));
+  }
+
+  console.log('\n=== 拉取模型清单（模型名不该写死在代码里）===');
+  {
+    const ids = await listModels({ base_url: `http://127.0.0.1:${PORT}/v1`, api_key: 'sk-test' });
+    ok('OpenAI 兼容端点解析出模型 id', ids.join(',') === 'deepseek-v4-pro,deepseek-flash', ids.join(','));
+
+    const anth = await listModels({ type: 'anthropic', base_url: `http://127.0.0.1:${PORT}`, api_key: 'sk-ant' });
+    ok('Anthropic 协议走 x-api-key 并解析', anth[0] === 'claude-sonnet-4-5', anth.join(','));
+
+    try {
+      await listModels({ base_url: `http://127.0.0.1:${PORT}/v1`, api_key: 'bad' });
+      ok('key 错要报错', false);
+    } catch (e) {
+      ok('key 错归为 auth 类', e instanceof LlmError && e.kind === 'auth', e.kind);
+    }
+
+    try {
+      await listModels({ base_url: '' });
+      ok('没填地址要拦下', false);
+    } catch (e) {
+      ok('没填地址归为 config 类', e instanceof LlmError && e.kind === 'config', e.kind);
+    }
   }
 
   mock.close();

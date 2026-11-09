@@ -68,6 +68,53 @@ async function post(url, headers, body, timeoutMs) {
   return json;
 }
 
+// 让服务商自己报出它能用的模型名。
+//
+// 模型名迭代比代码快得多：DeepSeek 的 deepseek-chat / deepseek-reasoner 已于 2026-07-24
+// 退役，现在只有 deepseek-flash 和 deepseek-v4-pro。任何写死在预设里的名字都会过期，
+// 过期的表现是「测试连接」报模型不存在——用户完全看不出是名字旧了。
+// OpenAI 兼容端点 GET {base}/models；Anthropic GET {base}/v1/models。
+export async function listModels({ type = 'openai', base_url, api_key = '', timeoutMs = 15000 }) {
+  const base = String(base_url || '').trim().replace(/\/+$/, '');
+  if (!base) throw new LlmError('config', '先填接口地址');
+
+  const anthropic = type === 'anthropic';
+  const url = anthropic ? `${base}/v1/models?limit=100` : `${base}/models`;
+  const headers = anthropic
+    ? { 'x-api-key': api_key, 'anthropic-version': '2023-06-01' }
+    : (api_key ? { Authorization: `Bearer ${api_key}` } : {});
+
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  let res, txt;
+  try {
+    res = await fetch(url, { headers, signal: ctrl.signal });
+    txt = await res.text();
+  } catch (e) {
+    if (e?.name === 'AbortError') throw new LlmError('timeout', `读取模型列表超时（${Math.round(timeoutMs / 1000)}s）`, { url });
+    throw new LlmError('network', '连不上这个地址', { url, message: e?.message });
+  } finally {
+    clearTimeout(timer);
+  }
+
+  let json = null;
+  try { json = JSON.parse(txt); } catch { /* 下面按状态码判 */ }
+  if (!res.ok) {
+    const kind = res.status === 401 || res.status === 403 ? 'auth'
+      : res.status === 429 ? 'rate'
+      : 'http';
+    const msg = json?.error?.message || json?.message || `HTTP ${res.status}`;
+    throw new LlmError(kind, msg, { status: res.status, body: txt.slice(0, 300) });
+  }
+
+  const arr = Array.isArray(json) ? json : (json?.data || json?.models || []);
+  const ids = arr
+    .map((m) => (typeof m === 'string' ? m : (m?.id || m?.name)))
+    .filter((s) => typeof s === 'string' && s.trim());
+  if (!ids.length) throw new LlmError('format', '没有从返回里找到模型名', { body: txt.slice(0, 200) });
+  return [...new Set(ids)];
+}
+
 // ---------- OpenAI 兼容 ----------
 async function callOpenAI(text, tools, p, timeoutMs, maxTokens) {
   const headers = { ...p.headers };

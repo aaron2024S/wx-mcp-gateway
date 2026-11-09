@@ -299,7 +299,15 @@
       <div class="field"><label>标识</label><input id="pvId" class="mono-input" placeholder="my-llm"></div>
       <div class="field"><label>协议</label><select id="pvType"><option value="openai">OpenAI 兼容</option><option value="anthropic">Anthropic</option></select></div>
       <div class="field"><label>接口地址</label><input id="pvBase" class="mono-input" placeholder="https://api.example.com/v1"></div>
-      <div class="field"><label>模型</label><input id="pvModel" class="mono-input" placeholder="厂商文档里的模型名"></div>
+      <div class="field">
+        <label>模型</label>
+        <div style="display:flex; gap:8px">
+          <input id="pvModel" class="mono-input" list="pvModelList" placeholder="厂商文档里的模型名" style="flex:1">
+          <button class="btn sm ghost" id="pvFetchModels" type="button" title="按地址和 Key 问服务商要一份模型清单">拉取列表</button>
+        </div>
+        <datalist id="pvModelList"></datalist>
+        <div class="hint" id="pvModelHint">模型名会随厂商迭代而过期，填之前点「拉取列表」拿最新的；也可以直接手输。</div>
+      </div>
       <div class="field">
         <label>API Key</label>
         <input id="pvKey" type="password" placeholder="留空表示不需要（如本地 Ollama）">
