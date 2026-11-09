@@ -230,12 +230,35 @@ function humanTime(v) {
   return d.getFullYear() === now.getFullYear() ? `${md} ${hm}` : `${d.getFullYear()}-${md} ${hm}`;
 }
 
+// 邮件信头里的「认证结果」「Return-Path」是给模型判断钓鱼用的机器串，
+// 应用习惯把它们拼在正文前面。例如：
+//   认证结果：mx.qq.com; spf=pass smtp.mailfrom=<econtract@pushmail…> (ip=205.205.208.10) …
+// 一串 IP、等号和 @，人读不出任何信息，却把真正的正文挤到九百字之外。这里把它折叠成一句。
+// 只动「有中文标签：+ 值超过 140 字 + 几乎没有中文 + 含 = @ ;」的行：
+// 中文长段落、正文里的链接列表都不满足，不会被误伤。
+function foldMachineLines(text) {
+  return text.split('\n').map((line) => {
+    if (line.length <= 140) return line;
+    const m = line.match(/^([^：:\n]{1,14})[：:]\s*(.+)$/);
+    if (!m) return line;
+    const value = m[2];
+    if (!/[=@;]/.test(value)) return line;
+    const cjk = (value.match(/[\u4e00-\u9fff]/g) || []).length;
+    if (cjk / value.length > 0.2) return line;
+    return `${m[1]}：${value.slice(0, 60)}…（省略 ${value.length - 60} 字）`;
+  }).join('\n');
+}
+
 // 应用返回的纯文本里常夹着写给模型看的定位信息，以及未格式化的 UTC 时间戳。
 //   · 「· uid=101」——用户看到只会问「uid 是什么」
 //   · 「2026-11-09T06:05:00Z」——一串没人会读的字符，而且还是 UTC，和手机上的钟差 8 小时
 // 只清这两种形状（都极固定，不会误伤邮件正文）。不带 Z 的时间不动，当作已经是本地时间。
 function humanize(raw) {
   return String(raw || '')
+    // 单独的回车（老式 CRSF / 信头折行）在微信里会把同一行反复覆盖，看起来像乱码，
+    // 统一当换行处理。先处理 \r\n，再把剩下的裸 \r 换掉。
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
     .replace(/\s*[·|]\s*uid\s*=\s*\d+/gi, '')
     .replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?Z/g, (m) => humanTime(m))
     .replace(/\n{3,}/g, '\n\n')
@@ -353,9 +376,12 @@ export function renderResult(tool, res, { limit = 8 } = {}) {
     return { text: hint ? `「${tool.title || tool.name}」：${hint}` : `「${tool.title || tool.name}」没有数据。` };
   }
 
-  // 非列表：纯文本截断（先把写给模型看的定位信息清掉，再判长度）
-  const raw = humanize(res.text);
+  // 非列表：纯文本截断（先把写给模型看的定位信息清掉、把机器信头折叠，再判长度）
+  const raw = foldMachineLines(humanize(res.text));
   if (!raw) return { text: `「${tool.title || tool.name}」执行完成，没有返回内容。` };
   if (raw.length <= 900) return { text: raw };
-  return { text: raw.slice(0, 900) + `\n…（共 ${raw.length} 字，已截断）` };
+  // 截在行边界上：从中间切断会把一个词劈成两半，看着像乱码
+  const cut = raw.lastIndexOf('\n', 900);
+  const head = raw.slice(0, cut > 600 ? cut : 900);
+  return { text: head + `\n…（共 ${raw.length} 字，已截断）` };
 }

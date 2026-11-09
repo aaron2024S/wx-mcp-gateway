@@ -652,7 +652,7 @@ async function main() {
     ok('schema 里没有的参数不会硬塞', captured2?.account === undefined && captured2?.uid === 7, JSON.stringify(captured2));
   }
 
-  console.log('\n=== ④k 参数：模型读到的要用上，回序号要挑凑得齐的工具 ===');
+  console.log('\n=== ④k 参数与正文：模型读到的要用上，机器信头别占屏 ===');
   {
     // ① 「帮我找一封有关旅游的邮件」里明明有关键词，早先却回「还差一个关键词」。
     //    原因是 _begin 只做模板解析（要「关键词：xxx」这种写法），把模型读出来的
@@ -727,6 +727,27 @@ async function main() {
     ok('校验错误不把内部报文念给用户',
       !/MCP error|Invalid input|read_attachment|expected number|NaN/.test(bad.text), bad.text);
     ok('但要说清下一步怎么办', /凑齐/.test(bad.text) && /再来一次/.test(bad.text), bad.text);
+
+    // ⑤ 读正文时应用会把「认证结果」这类信头拼在正文前面，值是几百字的机器串
+    //    （spf= / smtp.mailfrom= / ip=…）。原样显示会把正文挤出去，用户只看到乱码。
+    const authVal = 'mx.qq.com; spf=pass smtp.mailfrom=<econtract@pushmail.example.com> '
+      + '(ip=205.205.208.10); dkim=pass header.d=pushmail.example.com; dmarc=pass action=none; '
+      + 'received-spf=pass client-ip=205.205.208.10;';
+    const mail = renderResult({ title: '读取邮件正文' }, {
+      text: `主题：旅游合同签订\n发件人：econtract@pushmail.example.com\n认证结果：${authVal}\n\n` +
+        '您与全国旅游监管服务平台签署了一份《境内旅游合同》，请查收。',
+    });
+    ok('机器信头被折叠，不再占满屏', /省略 \d+ 字/.test(mail.text) && mail.text.length < 260, mail.text);
+    ok('正文还在', /境内旅游合同/.test(mail.text), mail.text);
+
+    // 中文长段落不能跟着被折叠——那不是机器串
+    const para = '这'.repeat(200);
+    const kept = renderResult({ title: '读取邮件正文' }, { text: `正文：${para}` });
+    ok('中文长段落原样保留', kept.text.includes(para), `${kept.text.length} 字`);
+
+    // 单独的回车符在微信里会把同一行反复覆盖，看起来像乱码
+    const cr = renderResult({ title: '读取邮件正文' }, { text: '主题：A\r发件人：B\r\n正文：C' });
+    ok('回车统一成换行', !cr.text.includes('\r') && cr.text.split('\n').length >= 3, JSON.stringify(cr.text));
   }
 
   console.log('\n=== ⑤ 重投去重 ===');
