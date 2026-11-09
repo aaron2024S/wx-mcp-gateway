@@ -199,6 +199,45 @@ async function main() {
     ok('never 模式下不调 AI', r.kind === 'menu' && r.note === '没听懂', String(r.note));
   }
 
+  console.log('\n=== 四档 llm_when 互不相同（「命中但有歧义」原来形同虚设）===');
+  {
+    // 这一档原来和「本地没命中时」完全一样：confident 分支提前 return，
+    // ambiguous 的判断写在它后面，永远走不到。用假 registry 直接钉分支。
+    const T = { key: 'fake.send', name: 'send', title: '发送消息', appLabel: '测试', risk: 'read' };
+    const fake = (confident, ambiguous) => ({
+      tools: [T],
+      match: () => ({
+        confident, ambiguous, understood: true,
+        best: { tool: T, score: 0.6 },
+        candidates: [{ tool: T, score: 0.6 }],
+        appId: null,
+      }),
+      llmTools: () => [{ name: 'fake.send', description: '发送消息', inputSchema: { type: 'object', properties: {} } }],
+      find: (k) => (k === 'fake.send' ? T : null),
+    });
+    const cfgMode = (mode) => {
+      const c = cfgWith({ type: 'openai', base_url: `http://127.0.0.1:${PORT}/v1`, model: 'mock-1', api_key: 'k' });
+      c.routing.llm_when = mode;
+      return c;
+    };
+
+    let before = seen.length;
+    const a = await route('随便说一句', { registry: fake(true, true), config: cfgMode('ambiguous') });
+    ok('ambiguous：分数达标但有歧义 → 问 AI', seen.length > before && a.via === 'llm', `${a.via} / ${seen.length - before} 次`);
+
+    before = seen.length;
+    const b = await route('随便说一句', { registry: fake(true, true), config: cfgMode('miss') });
+    ok('miss：同样有歧义也不问，直接执行', seen.length === before && b.via === 'local', `${b.via} / ${seen.length - before} 次`);
+
+    before = seen.length;
+    const c2 = await route('随便说一句', { registry: fake(true, false), config: cfgMode('ambiguous') });
+    ok('ambiguous：无歧义时仍走本地，不多花一次请求', seen.length === before && c2.via === 'local', `${c2.via} / ${seen.length - before} 次`);
+
+    before = seen.length;
+    const d2 = await route('随便说一句', { registry: fake(false, false), config: cfgMode('never') });
+    ok('never：不自信时也只回菜单，不碰 AI', seen.length === before && d2.kind === 'menu', `${d2.kind} / ${seen.length - before} 次`);
+  }
+
   console.log('\n=== 拉取模型清单（模型名不该写死在代码里）===');
   {
     const ids = await listModels({ base_url: `http://127.0.0.1:${PORT}/v1`, api_key: 'sk-test' });

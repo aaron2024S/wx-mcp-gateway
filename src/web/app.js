@@ -397,6 +397,23 @@ function renderWxCard() {
 
 // ---- 设置：表单 -------------------------------------------------------
 
+// 四档到底各自什么时候会真的发请求——写在旁边，省得用户猜。
+// 文案要和 src/router.js 的 needLLM / askBecauseAmbiguous 保持一致。
+const LLM_WHEN_TEXT = {
+  never: '只走本地索引。认不出来就给菜单让你挑，一次外部请求都不发。',
+  miss: '本地认得出就直接执行，认不出才问 AI。日常用这档最划算。',
+  ambiguous: '本地虽然能选出工具，但前两名分数咬得很近时也问一次 AI 确认；请求次数比上一档多。',
+  always: '每句话都先交给 AI，失败才回落本地。最灵活，但每句多花 1~3 秒，内容也会发到外部厂商。',
+};
+
+function renderLlmWhenHint() {
+  const el = $('#setLlmWhen');
+  const hint = $('#setLlmWhenHint');
+  if (!el || !hint) return;
+  const off = S.data?.settings?.llm_enabled !== true ? '（AI 兜底当前是关的，这一档暂时不起作用）' : '';
+  hint.textContent = off + (LLM_WHEN_TEXT[el.value] || LLM_WHEN_TEXT.miss);
+}
+
 function fillSettings() {
   const s = S.data?.settings;
   if (!s) return;
@@ -407,6 +424,7 @@ function fillSettings() {
   $('#setConfirmRisk').value = (s.confirm_risk || []).join(',');
   $('#setLlmEnabled').checked = s.llm_enabled === true;
   $('#setLlmWhen').value = s.llm_when || 'miss';
+  renderLlmWhenHint();
 
   const apps = S.data.apps;
   $('#setDefaultApp').innerHTML = '<option value="">（不指定）</option>'
@@ -470,8 +488,9 @@ bindSetting('#setLlmEnabled', 'llm_enabled', (v) => v === true, (on) => {
   if (on && !$$('#provList .tool-line').length) {
     toast('还没有服务商，AI 兜底不会真正生效：先点「添加服务商」');
   }
+  renderLlmWhenHint();
 });
-bindSetting('#setLlmWhen', 'llm_when');
+bindSetting('#setLlmWhen', 'llm_when', undefined, renderLlmWhenHint);
 bindSetting('#setConfirmRisk', 'confirm_risk', (v) => (v ? v.split(',') : []));
 bindSetting('#setLlmDefault', 'llm_default', (v) => v || '');
 

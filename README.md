@@ -405,7 +405,7 @@ Node ≥ 20。
 ```bash
 npm test           # 端到端：假 iLink 网关 + 假 MCP，62 项断言
 npm run test:auth  # 登录：起真服务走完设密码→登录→改密→锁定，49 项断言
-npm run test:llm   # AI 路由层：假 OpenAI/Anthropic 端点 + 模型清单，26 项断言
+npm run test:llm   # AI 路由层：假 OpenAI/Anthropic 端点 + 模型清单 + 四档 llm_when，30 项断言
 npm run test:store # 配置合并：三层覆盖顺序 + 凭据不外泄，33 项断言
 npm run demo       # 拉起真的 MailNest 跑一遍中文匹配
 ```

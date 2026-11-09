@@ -73,13 +73,19 @@ export async function route(text, { registry, config }) {
     return { kind: 'menu', candidates: menuList(registry, local), note: r.error };
   }
 
-  // ② 本地自信：直接执行，不惊动 AI
-  if (local.confident) {
+  // ② 本地自信：直接执行，不惊动 AI。
+  //
+  // 但「命中但有歧义」这一档要在这里拦一道：分数过了 confident 线不等于选对了，
+  // 前两名咬得很近（registry 的 ambiguous，差值 < 0.12）时仍可能挑错。
+  // 这个判断必须放在 confident 之前——原来放后面，于是从来走不到，
+  // 那一档和「本地没命中时」行为完全一样，等于摆设。
+  const askBecauseAmbiguous = llmOn && mode === 'ambiguous' && local.ambiguous;
+  if (local.confident && !askBecauseAmbiguous) {
     return { kind: 'call', tool: local.best.tool, args: {}, via: 'local', score: local.best.score };
   }
 
-  // ③ 本地不自信，看配置要不要问 AI
-  if (llmOn && needLLM(mode, local)) {
+  // ③ 本地不自信（或命中但有歧义），看配置要不要问 AI
+  if (llmOn && (askBecauseAmbiguous || needLLM(mode, local))) {
     const r = await tryLLM(text, registry, config, local);
     if (r.kind === 'call' || r.kind === 'say') return r;
     // AI 失败。两种回落策略：

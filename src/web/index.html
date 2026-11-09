@@ -179,7 +179,10 @@
         <label class="switch"><input type="checkbox" id="setLlmEnabled"><span></span></label>
       </div>
       <div class="set-row">
-        <div class="grow"><div style="font-size:13px">什么时候问 AI</div><div class="hint">本地能确定时绝不惊动 AI，省时省钱也不外发隐私</div></div>
+        <div class="grow">
+          <div style="font-size:13px">什么时候问 AI</div>
+          <div class="hint" id="setLlmWhenHint">本地能确定时绝不惊动 AI，省时省钱也不外发隐私</div>
+        </div>
         <select id="setLlmWhen">
           <option value="never">从不用</option>
           <option value="miss">本地没命中时</option>
