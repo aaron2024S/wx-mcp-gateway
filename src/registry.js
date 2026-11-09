@@ -301,11 +301,13 @@ export class Registry {
       if (score >= 0.15) scored.push({ tool, score });
     }
 
-    // 分数接近时让只读排前面：同样能"列出文件夹"和"新建文件夹"，
+    // 分数几乎打平时让只读排前面：同样能"列出文件夹"和"新建文件夹"，
     // 用户更想看的通常是列出来那一个，而且只读操作错了也没有后果。
+    // 窗口必须很小：0.05 会把 0.58 vs 0.54 这种有意义的差距也当平局，
+    // 曾让「有没有末读邮件」选中 list_accounts（0.537）而压过 unread_count（0.58）。
     scored.sort((a, b) => {
       const d = b.score - a.score;
-      if (Math.abs(d) > 0.05) return d;
+      if (Math.abs(d) > 0.02) return d;
       return (RISK_ORDER[a.tool.risk] - RISK_ORDER[b.tool.risk])
         || a.tool.key.localeCompare(b.tool.key);
     });

@@ -24,6 +24,7 @@ import { Registry } from '../src/registry.js';
 import { SessionStore } from '../src/session.js';
 import { Agent } from '../src/agent.js';
 import { Log } from '../src/log.js';
+import { renderResult } from '../src/exec.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let pass = 0;
@@ -360,6 +361,44 @@ async function main() {
     // 单字别名不再进索引：句子里出现「读」「删」这种字不足以把工具顶成 confident
     const singles = rr.tools.flatMap((t) => t.derived.filter((a) => a.length < 2));
     ok('标题不再派生出单字别名', singles.length === 0, singles.join(','));
+  }
+
+  console.log('\n=== ④f 平局窗口收紧 + 未读数不再被渲染丢掉 ===');
+  {
+    // 真实事故：mailnest 上问「有没有末读邮件」，unread_count 0.58 最高、
+    // list_accounts 0.537 次之，但"分数差 ≤0.05 只读优先"的规则把 0.043 的
+    // 真实差距当平局，按字典序让 list_accounts 抢先；它的返回值里明明带着
+    // 各账号未读数，渲染时又被 itemLine 丢掉，用户看到一列光秃秃的账号名。
+    //
+    // 这里构造一个确定性复刻：两个只读工具 token 集合完全一致，唯一差别是
+    // 「未读」在 zzz 是 title（权重 1.6）、在 aaa 只在 description（1.0），
+    // 用一长串共享词把差距稀释到 0.044 —— 落在旧窗口 (0,0.05] 内、新窗口外。
+    const extra = Array.from({ length: 44 }, (_, i) =>
+      '词' + String.fromCharCode(0x4e00 + i * 2) + String.fromCharCode(0x4e01 + i * 2)).join(' ');
+    const desc = '未读 摘要 附件 大小 日期 发件 收件 状态 ' + extra;
+    const rr = new Registry({ routing: { local_threshold: 0.5, ask_threshold: 0.25 }, apps: [] });
+    rr.apps.set('mail', {
+      cfg: { id: 'mail', label: '邮箱' },
+      status: 'online',
+      rawTools: [
+        { name: 'aaa_list', title: '列出邮件', description: desc, annotations: { readOnlyHint: true } },
+        { name: 'zzz_list', title: '列出未读邮件', description: desc, annotations: { readOnlyHint: true } },
+      ],
+    });
+    rr._build();
+    const m = rr.match('列出未读邮件 ' + extra);
+    ok('分数差超过 2 个点就按分数来，不再让字典序翻盘', m.best?.tool.name === 'zzz_list', `${m.best?.tool.key} / ${m.best?.score?.toFixed(3)}`);
+
+    // 渲染层：数字型 unread 要显示出来，0 则不标
+    const out = renderResult(
+      { name: 'list_accounts', title: '列出邮箱账号' },
+      { isError: false, text: '', data: { accounts: [
+        { id: 'qq', email: 'a@qq.com', name: 'QQ邮箱', unread: 5 },
+        { id: 'n163', email: 'b@163.com', name: '163邮箱', unread: 0 },
+      ] } },
+    );
+    ok('列表行带出未读数', out.text.includes('未读 5'), out.text.split('\n')[1]);
+    ok('未读为 0 的账号不标未读', !out.text.includes('未读 0'), out.text.split('\n')[2]);
   }
 
   console.log('\n=== ⑤ 重投去重 ===');

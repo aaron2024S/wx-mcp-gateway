@@ -401,7 +401,7 @@ Node ≥ 20。
 ## 开发与测试
 
 ```bash
-npm test           # 端到端：假 iLink 网关 + 假 MCP，59 项断言
+npm test           # 端到端：假 iLink 网关 + 假 MCP，62 项断言
 npm run test:auth  # 登录：起真服务走完设密码→登录→改密→锁定，49 项断言
 npm run test:llm   # AI 路由层：假 OpenAI/Anthropic 端点，22 项断言
 npm run test:store # 配置合并：三层覆盖顺序 + 凭据不外泄，33 项断言

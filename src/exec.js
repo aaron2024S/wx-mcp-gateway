@@ -194,6 +194,9 @@ function itemLine(item, idx) {
   }
   const flags = [];
   if (item.seen === false || item.unread === true) flags.push('未读');
+  // 数字型 unread 不能丢：list_accounts 这类工具专门算了各账号的未读数，
+  // 渲染时扔掉的话，用户问「有没有未读」拿到的就是一列光秃秃的账号名
+  if (typeof item.unread === 'number' && item.unread > 0) flags.push(`未读 ${item.unread}`);
   if (item.flagged === true || item.starred === true) flags.push('★');
   if (item.has_attachments === true || item.attachments?.length) flags.push('附件');
 
