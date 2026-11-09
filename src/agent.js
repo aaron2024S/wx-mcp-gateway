@@ -318,7 +318,14 @@ export class Agent {
     if (!detail) return null;
 
     const primary = (detail.inputSchema?.required || [])[0] || ref.argKey;
-    const args = { [primary]: ref.value };
+    // 列表项可能自带定位参数（跨账号邮件要同时给 uid 和 account）。
+    // 只传详情工具 schema 里真的有的键——不然多塞一个参数会被应用当成非法入参。
+    const props = detail.inputSchema?.properties || {};
+    const extra = {};
+    for (const [k, v] of Object.entries(ref.extra || {})) {
+      if (k in props) extra[k] = v;
+    }
+    const args = { ...extra, [primary]: ref.value };
     return this._run(chatId, detail.key, args, trigger, contextToken, { via: 'ref' }).then(() => ({ handled: true }));
   }
 

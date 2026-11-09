@@ -192,6 +192,11 @@ function itemLine(item, idx) {
     if (s && s !== name) subs.push(s);
     if (subs.length >= 2) break;
   }
+  // 跨账号列邮件时每条带 account（uid 只在单个账号内唯一）：不标出来，
+  // 一串「未读」根本看不出是哪個邮箱的。放最前面，别跟 from/date 抢位置。
+  const acct = typeof item.account === 'string' && item.account.trim()
+    ? `[${brief(item.account, 20)}] `
+    : '';
   const flags = [];
   if (item.seen === false || item.unread === true) flags.push('未读');
   // 数字型 unread 不能丢：list_accounts 这类工具专门算了各账号的未读数，
@@ -200,7 +205,7 @@ function itemLine(item, idx) {
   if (item.flagged === true || item.starred === true) flags.push('★');
   if (item.has_attachments === true || item.attachments?.length) flags.push('附件');
 
-  return `${idx}. ${name}${subs.length ? ' · ' + subs.join(' · ') : ''}${flags.length ? '  [' + flags.join(' ') + ']' : ''}`;
+  return `${idx}. ${acct}${name}${subs.length ? ' · ' + subs.join(' · ') : ''}${flags.length ? '  [' + flags.join(' ') + ']' : ''}`;
 }
 
 function idOf(item) {
@@ -232,7 +237,12 @@ export function renderResult(tool, res, { limit = 8 } = {}) {
       const id = idOf(it);
       if (id) {
         const label = itemLine(it, i + 1).replace(/^\d+\.\s*/, '').split('  [')[0];
-        items.push({ label, argKey: id.key, value: id.value });
+        // uid 只在单个账号内唯一。跨账号列表（未读邮件就是典型）必须把账号一起记住，
+        // 否则用户回「1」之后下一步拿到 uid 也定位不到是哪封信。
+        const extra = id.key === 'uid' && typeof it.account === 'string' && it.account.trim()
+          ? { account: it.account }
+          : null;
+        items.push({ label, argKey: id.key, value: id.value, ...(extra ? { extra } : {}) });
       }
     }
     if (found.list.length > shown.length) {

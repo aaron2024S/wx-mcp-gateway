@@ -478,6 +478,9 @@ async function main() {
     ok('发给 AI 的工具名合法（否则 DeepSeek 直接 400）',
       sentNames.length > 0 && sentNames.every((n) => /^[a-zA-Z0-9_-]{1,64}$/.test(n)),
       sentNames.join(','));
+    // 两个工具都能答时，模型会挑省事的那个（回一串计数）。提示词必须点明要明细就去明细。
+    const sysPrompt = llm.seen[0]?.body?.messages?.[0]?.content || '';
+    ok('提示词要求「要明细就别选只给统计的」', /只给统计/.test(sysPrompt), sysPrompt.slice(0, 60));
     const rec = logged.at(-1);
     ok('AI 选中的调用记为 via=llm', rec?.via === 'llm', String(rec?.via));
     ok('带上服务商与模型', rec?.provider === 'mock' && rec?.model === 'deepseek-flash', `${rec?.provider}/${rec?.model}`);
@@ -546,6 +549,57 @@ async function main() {
       ok(`${page} 引用了图标`, /rel="icon"[^>]*favicon\.svg/.test(read(page)), page);
       ok(`${page} 的品牌标识仍是原来那个`, /M2\.5 4\.2h11/.test(read(page)), page);
     }
+  }
+
+  console.log('\n=== ④j 跨账号邮件：每条标邮箱，回序号要带账号 ===');
+  {
+    // 用户问「有未读邮件吗」，工具返回的是多个账号混在一起的未读邮件。
+    // 这里钉两件事：① 回复里看得出哪封属于哪个邮箱；② 列表项记住 account——
+    // uid 只在单个账号内唯一，丢了账号，用户回「1」之后根本定位不到那封信。
+    const rendered = renderResult({ title: '列出邮件' }, {
+      data: {
+        messages: [
+          { uid: 7, account: 'QQ邮箱', subject: '合同确认', from: '张三 <a@b.com>', date: '昨天', unread: true },
+          { uid: 9, account: 'outlook', subject: '周会纪要', from: '李四 <c@d.com>', date: '前天', unread: true },
+        ],
+      },
+    });
+    ok('每条都标出属于哪个邮箱', /\[QQ邮箱\] 合同确认/.test(rendered.text) && /\[outlook\] 周会纪要/.test(rendered.text), rendered.text);
+    ok('列表项记住 account', rendered.items?.[0]?.extra?.account === 'QQ邮箱', JSON.stringify(rendered.items?.[0]));
+
+    // 直接验「回 1」这一跳：_run 打桩，只看它最终会带什么参数去调详情工具
+    const mk = (o) => ({ key: 'mail.x', appId: 'mail', risk: 'read', name: 'x', title: 'X', inputSchema: { type: 'object', properties: {} }, ...o });
+    const fakeRegistry = {
+      tools: [
+        mk({ key: 'mail.list_messages', name: 'list_messages' }),
+        mk({
+          key: 'mail.read_message', name: 'read_message',
+          inputSchema: { type: 'object', properties: { uid: { type: 'number' }, account: { type: 'string' } }, required: ['uid'] },
+        }),
+      ],
+      find(k) { return this.tools.find((t) => t.key === k) || null; },
+    };
+    const fake = new Agent({ registry: fakeRegistry, config, sessions: new SessionStore({ log, confirmTtl: 60 }), log, hooks: {} });
+    let captured = null;
+    fake._run = async (chatId, toolKey, args) => { captured = { toolKey, args }; return { handled: true }; };
+    fake.sessions.setLastList('ref-chat', rendered.items, 'mail.list_messages');
+    await fake._openListItem('ref-chat', rendered.items[0], 'wechat', 'CTX-R');
+    ok('回序号时把账号一起带上', captured?.args?.uid === 7 && captured?.args?.account === 'QQ邮箱', JSON.stringify(captured));
+
+    // 详情工具 schema 里没有 account 时不要硬塞（多传一个键会被应用当非法入参）
+    const noAcc = {
+      tools: [
+        mk({ key: 'mail.list_messages', name: 'list_messages' }),
+        mk({ key: 'mail.read_message', name: 'read_message', inputSchema: { type: 'object', properties: { uid: { type: 'number' } }, required: ['uid'] } }),
+      ],
+      find(k) { return this.tools.find((t) => t.key === k) || null; },
+    };
+    const fake2 = new Agent({ registry: noAcc, config, sessions: new SessionStore({ log, confirmTtl: 60 }), log, hooks: {} });
+    let captured2 = null;
+    fake2._run = async (chatId, toolKey, args) => { captured2 = args; return { handled: true }; };
+    fake2.sessions.setLastList('ref-chat2', rendered.items, 'mail.list_messages');
+    await fake2._openListItem('ref-chat2', rendered.items[0], 'wechat', 'CTX-R');
+    ok('schema 里没有的参数不会硬塞', captured2?.account === undefined && captured2?.uid === 7, JSON.stringify(captured2));
   }
 
   console.log('\n=== ⑤ 重投去重 ===');
