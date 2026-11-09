@@ -24,7 +24,7 @@ import { Registry } from '../src/registry.js';
 import { SessionStore } from '../src/session.js';
 import { Agent } from '../src/agent.js';
 import { Log } from '../src/log.js';
-import { renderResult } from '../src/exec.js';
+import { renderResult, prepareArgs } from '../src/exec.js';
 import { formatCall } from '../src/calllog.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -650,6 +650,83 @@ async function main() {
     fake2.sessions.setLastList('ref-chat2', rendered.items, 'mail.list_messages');
     await fake2._openListItem('ref-chat2', rendered.items[0], 'wechat', 'CTX-R');
     ok('schema 里没有的参数不会硬塞', captured2?.account === undefined && captured2?.uid === 7, JSON.stringify(captured2));
+  }
+
+  console.log('\n=== ④k 参数：模型读到的要用上，回序号要挑凑得齐的工具 ===');
+  {
+    // ① 「帮我找一封有关旅游的邮件」里明明有关键词，早先却回「还差一个关键词」。
+    //    原因是 _begin 只做模板解析（要「关键词：xxx」这种写法），把模型读出来的
+    //    args 整个丢掉了。这一条钉住「模型给的参数会被用上」。
+    const search = {
+      key: 'mail.search_messages', appId: 'mail', risk: 'read', name: 'search_messages', title: '搜索邮件',
+      inputSchema: { type: 'object', properties: { query: { type: 'string', title: '关键词' } }, required: ['query'] },
+    };
+    const reg = {
+      tools: [search],
+      find(k) { return this.tools.find((t) => t.key === k) || null; },
+      getApp() { return null; },
+      stats() { return { apps: [], toolCount: 1 }; },
+    };
+    const ag = new Agent({ registry: reg, config, sessions: new SessionStore({ log, confirmTtl: 60 }), log, hooks: {} });
+    const sent = [];
+    ag.hooks = { send: async (_c, t) => { sent.push(t); } };
+    let got = null;
+    ag._guard = async (_c, _t, args) => { got = args; return { handled: true }; };
+
+    await ag._begin('p1', search, '帮我找一封有关旅游的邮件', 'wechat', 'CTX', { via: 'llm' }, { query: '旅游' });
+    ok('模型读出的参数会被用上，不再反问', got?.query === '旅游' && !sent.some((t) => /还差一个/.test(t)), JSON.stringify(got));
+
+    // 模型把参数名写歪（keyword vs query）时，只缺一个必填就挪过去
+    got = null;
+    await ag._begin('p2', search, '找找带发票的邮件', 'wechat', 'CTX', { via: 'llm' }, { keyword: '发票' });
+    ok('参数名写歪了也能救回来', got?.query === '发票', JSON.stringify(got));
+
+    // ② 应用侧是 zod 严格校验：多余键、NaN 都会让整条调用被拒，必须在出网关掉
+    const numTool = {
+      key: 'mail.read_message', appId: 'mail', risk: 'read', name: 'read_message',
+      inputSchema: { type: 'object', properties: { uid: { type: 'number' }, account: { type: 'string' } }, required: ['uid'] },
+    };
+    const clean = prepareArgs(numTool, { uid: '7', account: '', index: NaN, junk: 1, note: null });
+    ok('多余键 / 空值 / NaN 不会发给应用',
+      clean.uid === 7 && clean.account === undefined && clean.index === undefined
+      && clean.junk === undefined && clean.note === undefined, JSON.stringify(clean));
+
+    // ③ 回「1」时，read_attachment 和 read_message 都带 uid，但前者还差「第几个附件」。
+    //    按 key 排序附件那个在前，于是曾经把「1」当成「读附件」，应用回 expected number, received NaN。
+    const rendered2 = renderResult({ title: '搜索邮件' }, {
+      data: { messages: [{ uid: 7, subject: '旅游合同签订成功通知', account: 'QQ邮箱' }] },
+    });
+    const mk2 = (o) => ({ key: 'mail.x', appId: 'mail', risk: 'read', name: 'x', title: 'X', inputSchema: { type: 'object', properties: {} }, ...o });
+    const reg2 = {
+      tools: [
+        mk2({ key: 'mail.search_messages', name: 'search_messages' }),
+        mk2({
+          key: 'mail.read_attachment', name: 'read_attachment',
+          inputSchema: { type: 'object', properties: { uid: {}, index: {}, account: {} }, required: ['uid', 'index'] },
+        }),
+        mk2({
+          key: 'mail.read_message', name: 'read_message',
+          inputSchema: { type: 'object', properties: { uid: {}, account: {} }, required: ['uid'] },
+        }),
+      ],
+      find(k) { return this.tools.find((t) => t.key === k) || null; },
+    };
+    const ag2 = new Agent({ registry: reg2, config, sessions: new SessionStore({ log, confirmTtl: 60 }), log, hooks: {} });
+    let picked = null;
+    ag2._run = async (_c, k, a) => { picked = { k, a }; return { handled: true }; };
+    ag2.sessions.setLastList('p3', rendered2.items, 'mail.search_messages');
+    await ag2._openListItem('p3', rendered2.items[0], 'wechat', 'CTX');
+    ok('回序号不会跳到「读附件」', picked?.k === 'mail.read_message', JSON.stringify(picked));
+    ok('挑中的工具带上了来源账号', picked?.a?.uid === 7 && picked?.a?.account === 'QQ邮箱', JSON.stringify(picked));
+
+    // ④ 应用把校验失败原样抛回来时，不能把 zod 报文念给用户
+    const bad = renderResult({ title: '读取附件内容' }, {
+      isError: true,
+      text: 'MCP error -32602: Input validation error: Invalid arguments for tool read_attachment: Invalid input: expected number, received NaN at index',
+    });
+    ok('校验错误不把内部报文念给用户',
+      !/MCP error|Invalid input|read_attachment|expected number|NaN/.test(bad.text), bad.text);
+    ok('但要说清下一步怎么办', /凑齐/.test(bad.text) && /再来一次/.test(bad.text), bad.text);
   }
 
   console.log('\n=== ⑤ 重投去重 ===');

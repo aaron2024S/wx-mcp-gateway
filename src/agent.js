@@ -7,7 +7,7 @@
 // 如果先走识别，本地索引会把它匹配到某个奇怪的工具上。状态必须最先看。
 
 import { route, renderMenu } from './router.js';
-import { checkRisk, missingArgs, describeParam, coerceArg, parseInlineArgs, runTool, renderResult, riskLabel } from './exec.js';
+import { checkRisk, missingArgs, describeParam, coerceArg, parseInlineArgs, prepareArgs, mergeArgs, runTool, renderResult, riskLabel } from './exec.js';
 import { isYes, isNo, parseOrdinal } from './session.js';
 
 const MAX_INPUT = 2000;
@@ -145,7 +145,7 @@ export class Agent {
         usage: decision.usage,
         aiError: decision.aiError || null,
       };
-      return this._begin(chatId, decision.tool, raw, trigger, contextToken, meta);
+      return this._begin(chatId, decision.tool, raw, trigger, contextToken, meta, decision.args || {});
     }
 
     // menu
@@ -201,10 +201,11 @@ export class Agent {
   }
 
   // 参数是否齐，齐了就走风险检查
-  async _begin(chatId, tool, text, trigger, contextToken, meta = {}) {
-    // 用户可能在句子里直接给了参数（「发给 a@b.com 主题 周会 内容 …」），
-    // 能抠出来就先抠，抠不出来才逐项问
-    const merged = parseInlineArgs(tool, text || '');
+  async _begin(chatId, tool, text, trigger, contextToken, meta = {}, aiArgs = {}) {
+    // 参数有两个来源：模型从这句话里读出来的（aiArgs），和用户按模板敲的（「关键词：旅游」）。
+    // 早先只用了后者，于是「帮我找一封有关旅游的邮件」明明带着关键词，却被追问「关键词是什么：
+    // 一句话里并没有『关键词：』这种模板——模型读对了也没用上。现在两个都收。
+    const merged = mergeArgs(tool, aiArgs, parseInlineArgs(tool, text || ''));
     const miss = missingArgs(tool, merged);
     if (miss.length) {
       this.sessions.setPending(chatId, { type: 'args', toolKey: tool.key, args: merged, missing: miss, meta });
@@ -262,12 +263,24 @@ export class Agent {
       await this.hooks.send(chatId, '这个操作现在不可用了（应用可能被移除）。', contextToken);
       return { handled: true };
     }
+    // 最后一道整形：把 schema 里没有的键去掉、按类型转一遍。走到这里还可能因为
+    // 「列表项只带了 uid，而详情工具还要一个附件序号」这类情况缺参数——缺了就问，
+    // 别硬传。硬传的结果是应用抛「Invalid input: expected number, received NaN」，
+    // 用户只会看到一串内部报文，还以为是坏了。
+    const argv = prepareArgs(tool, args || {});
+    const miss = missingArgs(tool, argv);
+    if (miss.length) {
+      this.sessions.setPending(chatId, { type: 'args', toolKey: tool.key, args: argv, missing: miss, meta });
+      await this.hooks.send(chatId, `要执行「${tool.title || tool.name}」，还差一个${describeParam(tool, miss[0])}：`, contextToken);
+      return { handled: true };
+    }
+
     const app = this.registry.getApp(tool.appId);
     const timeoutMs = (app?.cfg?.timeout || this.config.gateway.call_timeout || 20) * 1000;
     const asyncAfter = Math.max(1, this.config.gateway.async_after || 10) * 1000;
 
     const started = Date.now();
-    const p = runTool(this.registry, tool, args, timeoutMs);
+    const p = runTool(this.registry, tool, argv, timeoutMs);
 
     // 慢操作先回执：微信侧长轮询 35 秒，工具跑 3 分钟时不能让人干等
     const slow = await Promise.race([p.then(() => false), sleep(Math.min(asyncAfter, timeoutMs)).then(() => true)]);
@@ -291,7 +304,7 @@ export class Agent {
     this._logCall({
       trigger,
       tool,
-      args,
+      args: argv,
       ok: !res.isError,
       ms: res.ms || Date.now() - started,
       err: res.isError ? String(res.text || '').slice(0, 120) : null,
@@ -307,15 +320,32 @@ export class Agent {
     const listTool = this.registry.find(listToolKey);
     if (!listTool) return null;
 
-    // 找同应用里名字像"读取详情"的只读工具，且必填项里含有列表项的 id 字段名
+    // 找同应用里名字像"读取详情"的只读工具，且必填项里含有列表项的 id 字段名。
+    //
+    // 但必须只挑「我们凑得出参数」的那个：同一个应用常同时有 read_message（只要 uid）
+    // 和 read_attachment（uid + 第几个附件），两者都叫 read*，按 key 排序附件那个在前。
+    // 2026-11-09 实测就是这样把用户的「1」当成「读附件」：uid 有、序号没有，应用侧
+    // z.coerce.number(undefined) 得到 NaN，回了一句 expected number, received NaN。
     const brothers = this.registry.tools.filter((t) => t.appId === listTool.appId && t.key !== listTool.key);
-    const detail = brothers.find((t) => {
+    const cands = brothers.filter((t) => {
       if (t.risk !== 'read') return false;
       if (!/read|get|detail|show|view|fetch|info|open/i.test(t.name)) return false;
-      const req = t.inputSchema?.required || [];
-      return req.includes(ref.argKey);
+      return (t.inputSchema?.required || []).includes(ref.argKey);
     });
-    if (!detail) return null;
+
+    // 手里能填的键：列表项的 id 本身 + 它自带的定位信息（跨账号邮件的 account）。
+    // 必填项全部落在这一组里才敢调，少一个就换下一个候选。
+    const known = new Set([ref.argKey, ...Object.keys(ref.extra || {})]);
+    const usable = cands.filter((t) => (t.inputSchema?.required || []).every((k) => known.has(k)));
+    if (!usable.length) return null;
+
+    // 都可用时，选和列表工具同名的那个（list_messages → read_message），
+    // 不要跳到隔壁的「读附件」或「读草稿」上——它们只是碰巧也带 uid。
+    const words = (n) => String(n || '').toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 2);
+    const listWords = words(listTool.name);
+    const detail = usable
+      .map((t) => ({ t, shared: words(t.name).filter((w) => listWords.includes(w)).length }))
+      .sort((a, b) => b.shared - a.shared || a.t.key.localeCompare(b.t.key))[0].t;
 
     const primary = (detail.inputSchema?.required || [])[0] || ref.argKey;
     // 列表项可能自带定位参数（跨账号邮件要同时给 uid 和 account）。

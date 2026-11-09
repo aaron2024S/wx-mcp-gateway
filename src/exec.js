@@ -67,6 +67,11 @@ export function describeParam(tool, name) {
 // 不猜类型转换——除非 schema 明说是 number/boolean，否则一律当字符串。
 export function coerceArg(tool, name, raw) {
   const p = propOf(tool, name);
+  // 已经是目标类型的别再过一遍字符串：数组被 String() 之后会变成 "a,b"，
+  // 布尔被当成 "true" 都是多余的破坏。
+  if ((p.type === 'number' || p.type === 'integer') && typeof raw === 'number' && Number.isFinite(raw)) return raw;
+  if (p.type === 'boolean' && typeof raw === 'boolean') return raw;
+  if (p.type === 'array' && Array.isArray(raw)) return raw;
   const s = String(raw ?? '').trim();
   if (p.type === 'number' || p.type === 'integer') {
     const n = Number(s.replace(/[^\d.\-]/g, ''));
@@ -79,6 +84,43 @@ export function coerceArg(tool, name, raw) {
     return s.split(/[,，、\s]+/).filter(Boolean);
   }
   return s;
+}
+
+// 交给应用之前，把参数整形成 schema 认的样子。
+//
+// 应用侧基本都是 zod 严格校验：多一个 schema 里没有的键、该给数字的给了空值，
+// 整条调用会被直接拒掉，报回来的还是「expected number, received NaN」这种
+// 只有写代码的人看得懂的话。模型和用户都不会照着 schema 说话，所以这层归我们。
+export function prepareArgs(tool, args = {}) {
+  const props = tool.inputSchema?.properties;
+  const out = {};
+  if (!args || typeof args !== 'object' || Array.isArray(args)) return out;
+  for (const [k, v] of Object.entries(args)) {
+    if (props && !(k in props)) continue;                        // 没声明的键，传了也只会被拒
+    if (v === undefined || v === null) continue;
+    if (typeof v === 'number' && !Number.isFinite(v)) continue;   // NaN / Infinity
+    if (typeof v === 'string' && v.trim() === '') continue;
+    out[k] = coerceArg(tool, k, v);
+  }
+  return out;
+}
+
+// 一句话里的参数有两个来源：模型读懂的（aiArgs）和用户按模板敲的（inlineArgs）。
+// 后者是显式输入，优先级更高；模型给空的时候由它补位。
+export function mergeArgs(tool, aiArgs = {}, inlineArgs = {}) {
+  const props = tool.inputSchema?.properties;
+  const base = (aiArgs && typeof aiArgs === 'object' && !Array.isArray(aiArgs)) ? { ...aiArgs } : {};
+
+  // 模型常把 schema 里的 query 写成 keyword、把 uid 写成 id。只有一个必填项缺、
+  // 而模型又只多给了「一个」schema 不认识的标量时，把它挪过去——
+  // 比回头问用户「关键词是什么」体面得多。只挪一个，避免瞎配对。
+  const knownKeys = props ? Object.keys(props) : [];
+  const strays = Object.entries(base).filter(([k, v]) => !knownKeys.includes(k)
+    && (typeof v === 'string' || typeof v === 'number'));
+  const miss = missingArgs(tool, prepareArgs(tool, base));
+  if (props && miss.length === 1 && strays.length === 1) base[miss[0]] = strays[0][1];
+
+  return { ...prepareArgs(tool, base), ...prepareArgs(tool, inlineArgs) };
 }
 
 // 从一句话里挖参数（模板式输入）：
@@ -244,12 +286,25 @@ function idOf(item) {
   return null;
 }
 
+// 应用把校验失败原样抛回来时，用户看到的是
+// 「MCP error -32602: Input validation error: Invalid arguments for tool
+//   read_attachment: Invalid input: expected number, received NaN at index」——
+// 一句话里三个内部名词，谁看都只会觉得"坏了"。这类错误是**我们参数没凑齐**，
+// 说清楚「差什么、怎么办」就够了；原始报文留在容器日志里给排查用。
+function humanError(raw) {
+  const s = String(raw || '').trim();
+  if (/Input validation error|Invalid arguments|-32602/i.test(s)) {
+    return '这个操作需要的信息我没凑齐，应用那边没通过校验。换个说法再来一次，或者先让我把清单列给你看。';
+  }
+  return s.slice(0, 400);
+}
+
 /**
  * @returns {{ text: string, items?: Array<{label:string, key:string, value:any}> }}
  */
 export function renderResult(tool, res, { limit = 8 } = {}) {
   if (res.isError) {
-    return { text: `没能完成「${tool.title || tool.name}」。\n${String(res.text || '').slice(0, 400)}` };
+    return { text: `没能完成「${tool.title || tool.name}」。\n${humanError(res.text)}` };
   }
 
   const found = res.data ? findArray(res.data) : null;
