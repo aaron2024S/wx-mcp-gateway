@@ -346,11 +346,17 @@ export class Registry {
   llmTools(appFilter = null) {
     return this.tools
       .filter((t) => !appFilter || t.appId === appFilter)
-      .map((t) => ({
-        name: t.key,                       // 用 app.tool 保证跨应用唯一
-        description: [t.title, t.description].filter(Boolean).join('：').slice(0, 300),
-        inputSchema: t.inputSchema,
-      }));
+      .map((t) => {
+        const desc = [t.title, t.description].filter(Boolean).join('：');
+        // 以前一律截到 300 字。问题在于应用作者习惯把最要紧的一句放在描述末尾
+        // （「指名了邮箱就必须传 account，不要查全部账号」正是这种），一刀切正好把它剪掉，
+        // 模型于是只看到前半段的中性说明，参数就漏了。放宽到 600，超长才截并留省略号。
+        return {
+          name: t.key,                     // 用 app.tool 保证跨应用唯一
+          description: desc.length > 600 ? desc.slice(0, 600) + '…' : desc,
+          inputSchema: t.inputSchema,
+        };
+      });
   }
 
   stats() {

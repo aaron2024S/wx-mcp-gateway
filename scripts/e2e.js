@@ -448,6 +448,40 @@ async function main() {
     );
     ok('列表行带出未读数', out.text.includes('未读 5'), out.text.split('\n')[1]);
     ok('未读为 0 的账号不标未读', !out.text.includes('未读 0'), out.text.split('\n')[2]);
+
+    // 跨账号合并的结果必须自己说明白。2026-11-09 实测：问「outlook 未读邮件」，
+    // 模型漏了 account，三个邮箱的未读混在一起列了 20 条，界面上只有每行开头一个 [QQ邮箱]，
+    // 用户以为在看 outlook。应用返回的 hint 是写给模型看的（含 account= 这类内部名），
+    // 所以渲染层按数据特征自己补一句。
+    const merged = renderResult(
+      { name: 'mail.list_messages', title: '列出邮件' },
+      { isError: false, text: '', data: { total: 3, messages: [
+        { uid: 1, subject: 'Run failed', account: 'outlook' },
+        { uid: 2, subject: '每日简报', account: 'QQ邮箱' },
+        { uid: 3, subject: '安全提醒', account: 'outlook' },
+      ] } },
+    );
+    ok('跨账号合并会点明「几个邮箱」', /2 个邮箱合并/.test(merged.text), merged.text.split('\n').slice(-2).join(' ⏎ '));
+    ok('跨账号条目仍能回序号继续操作', merged.items?.length === 3, String(merged.items?.length));
+
+    const single = renderResult(
+      { name: 'mail.list_messages', title: '列出邮件' },
+      { isError: false, text: '', data: { messages: [{ uid: 1, subject: '只有一封', account: 'outlook' }] } },
+    );
+    ok('只有一个来源时不啰嗦「合并」', !/合并/.test(single.text), single.text.split('\n').slice(-1)[0]);
+
+    // 应用作者习惯把最要紧的一句放描述末尾（「指名邮箱就必须传 account」正是这种）。
+    // 以前一律截到 300 字，正好把末尾的硬约束剪掉，模型只看到中性说明就开始漏参数。
+    const tail = '用户指名了某个邮箱时必须传 account，不要查全部账号。';
+    const long = new Registry({ routing: { local_threshold: 0.5, ask_threshold: 0.25 }, apps: [] });
+    long.apps.set('mail', {
+      cfg: { id: 'mail', label: '邮箱' },
+      status: 'online',
+      rawTools: [{ name: 'list_messages', title: '列出邮件', description: '列邮件摘要。'.repeat(60) + tail }],
+    });
+    long._build();
+    const shipped = long.llmTools()[0].description;
+    ok('长描述不再把末尾的硬约束剪掉', shipped.includes('必须传 account'), `${shipped.length} 字`);
   }
 
   console.log('\n=== ④g 日志要看得出「是不是 AI 认的」和花了多少 token ===');

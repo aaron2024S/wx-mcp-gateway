@@ -248,6 +248,18 @@ export function renderResult(tool, res, { limit = 8 } = {}) {
     if (found.list.length > shown.length) {
       lines.push(`（还有 ${found.list.length - shown.length} 条没列出来）`);
     }
+    // 跨账号合并的结果必须自己说明白。2026-11-09 实测：用户问「outlook 未读邮件」，
+    // 模型漏了 account 参数，应用就返回了三个邮箱混在一起的 20 封——界面上只有每行开头
+    // 一个 [QQ邮箱]，用户以为是在看 outlook，其实是全部账号。应用返回的 hint 里本来有提示，
+    // 但它是写给模型看的（含 account= 这类内部参数名），不能直接给用户，这里按数据特征自己说一句。
+    const srcs = new Set(
+      shown
+        .filter((it) => isPlain(it) && typeof it.account === 'string' && it.account.trim())
+        .map((it) => it.account.trim()),
+    );
+    if (srcs.size > 1) {
+      lines.push(`（以上是 ${srcs.size} 个邮箱合并的结果，方括号里是来源邮箱）`);
+    }
     lines.push('回复序号可对某一条继续操作。');
     return { text: lines.join('\n'), items };
   }
