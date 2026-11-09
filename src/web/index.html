@@ -75,7 +75,9 @@
       <button class="btn sm ghost" id="logoutBtn">退出登录</button>
     </div>
     <div class="row" style="margin-bottom:0">
-      <span class="lbl" id="verLabel">v0.3.6</span>
+      <!-- 版本号不写死：由 app.js 从 /api/state 取（源头是 package.json）。
+           留空是为了不再出现「镜像换了、页面还写旧号」这种第二出处。 -->
+      <span class="lbl" id="verLabel"></span>
       <span class="lbl" id="upLabel"></span>
     </div>
   </div>

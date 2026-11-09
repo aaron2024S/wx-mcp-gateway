@@ -14,7 +14,10 @@ services:
     # 和 CI 推送到 Docker Hub 的名字保持一致：本地 `docker compose build`
     # 出来的镜像可以直接 `docker push`，不用再 tag 一次。
     # 用现成镜像时把 build 那行删掉即可。
-    image: aaron2024s/wx-mcp-gateway:0.3.6
+    # 用 latest 是刻意的：版本号只写在 package.json 一处，CI 发版时同时推
+    # <版本> 和 latest 两个 tag，这里跟着 latest 就不用每次 bump 再改一遍。
+    # 要钉死某一版时，把 latest 换成具体版本号即可。
+    image: aaron2024s/wx-mcp-gateway:latest
     container_name: wx-mcp-gateway
     restart: unless-stopped
 

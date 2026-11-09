@@ -174,7 +174,11 @@ ok('有盐', typeof saved.salt === 'string' && saved.salt.length >= 16);
 console.log('\n=== ③ 登录后 ===');
 const st1 = await req('GET', '/api/state');
 ok('业务接口可用', st1.status === 200 && typeof st1.json?.version === 'string', String(st1.status));
-ok('返回的版本是新的', st1.json?.version === '0.3.6', st1.json?.version);
+// 期望值从 package.json 读，不写死：版本号只该有一个出处。
+// 这样这条断言同时验证了「接口确实把 package.json 的号透出去了」，
+// 而不是「接口返回了一个和我们抄的一样的字符串」。
+const PKG_VERSION = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
+ok('接口返回的版本与 package.json 一致', st1.json?.version === PKG_VERSION, `${st1.json?.version} / ${PKG_VERSION}`);
 
 const loginWhenIn = await req('GET', '/login');
 ok('已登录再访问 /login 会跳首页', loginWhenIn.status === 302 && loginWhenIn.location === '/', `${loginWhenIn.status} ${loginWhenIn.location}`);

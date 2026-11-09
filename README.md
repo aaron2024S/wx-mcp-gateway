@@ -59,7 +59,8 @@
 ```yaml
 services:
   wx-mcp-gateway:
-    image: aaron2024s/wx-mcp-gateway:0.3.6
+    # latest 一直指向最新版本（也可换成具体版本号钉死）
+    image: aaron2024s/wx-mcp-gateway:latest
     container_name: wx-mcp-gateway
     restart: unless-stopped
 
