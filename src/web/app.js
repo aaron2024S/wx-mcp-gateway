@@ -517,17 +517,21 @@ async function loadProviders() {
     $('#provList').innerHTML = list.length ? list.map((p) => `
       <div class="tool-line" style="cursor:default">
         <div style="flex:1; min-width:0">
-          <div class="n">${esc(p.id)} <span class="badge ghost">${esc(p.type)}</span></div>
+          <div class="n">${esc(p.id)} <span class="badge ghost">${esc(p.type)}</span>
+            ${p.source === 'config' ? '<span class="badge ghost" title="写在 config.json 里；在界面上删只是不用它，文件不会被改">配置文件</span>' : ''}</div>
           <div class="d">${esc(p.base_url)} · ${esc(p.model)} · ${p.hasKey ? '已设置密钥' : '无密钥'}</div>
         </div>
         <span class="sp"></span>
-        ${p.source === 'config' ? '<span class="badge ghost" title="来自 config.json，要在界面删就先把它从文件里去掉">配置文件</span>' : `<button class="btn sm ghost" data-del-prov="${esc(p.id)}">删除</button>`}
+        <button class="btn sm ghost" data-del-prov="${esc(p.id)}" data-from="${p.source}">删除</button>
       </div>`).join('') : '<div class="hint">还没有服务商。点右上角「添加服务商」，把厂商给的接口地址和模型名填进去就行——任何 OpenAI 兼容的服务都能用，不限于预设列表。不配也能用：本地别名表已经能覆盖大部分说法。</div>';
 
     $$('[data-del-prov]').forEach((b) => {
       b.onclick = async (e) => {
         e.stopPropagation();
-        if (!confirm('删除这个服务商？')) return;
+        const tip = b.dataset.from === 'config'
+          ? '这个服务商写在 config.json 里。在界面上删除只是让它不再被使用，不会改动那个文件。继续？'
+          : '删除这个服务商？';
+        if (!confirm(tip)) return;
         await api('/api/providers/' + b.dataset.delProv, { method: 'DELETE' });
         loadProviders();
         toast('已删除');

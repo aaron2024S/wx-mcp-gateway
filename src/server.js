@@ -10,6 +10,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { VERSION } from './version.js';
 import { loadConfig } from './config.js';
 import { Log, errText } from './log.js';
 import { ensureDir, appendJsonl, readJsonl, trimJsonl } from './store.js';
@@ -27,7 +28,6 @@ import {
   MAX_FAILURES, TTL_KEEP_MS, lockedHint,
 } from './auth.js';
 
-const VERSION = '0.3.0';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const WEB_DIR = path.join(HERE, 'web');
 
@@ -81,8 +81,11 @@ function applySettings() {
   config.routing.llm_when = s.llm_when;
   config.apps = appStore.resolvedApps();
   config.llm.providers = appStore.resolvedProviders();
-  config.llm.default = s.llm_default || Object.keys(config.llm.providers)[0] || '';
-  config.llm.enabled = s.llm_enabled === true && Object.keys(config.llm.providers).length > 0;
+  // 默认服务商可能已经被删掉了——不校验的话 llm.default 会指向一个不存在的 id，
+  // 表现是"AI 开着但每次调用都报服务商不存在"。
+  const provIds = Object.keys(config.llm.providers);
+  config.llm.default = provIds.includes(s.llm_default) ? s.llm_default : (provIds[0] || '');
+  config.llm.enabled = s.llm_enabled === true && provIds.length > 0;
   return s;
 }
 applySettings();

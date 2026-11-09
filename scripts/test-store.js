@@ -37,6 +37,14 @@ const baseConfig = {
         model: 'deepseek-chat',
         api_key: 'CFG-KEY',
       },
+      // 只存在于 config.json 里的第二家，用来验证"界面能删掉它"
+      spare: {
+        label: '备用',
+        type: 'openai',
+        base_url: 'https://spare.example/v1',
+        model: 'spare-1',
+        api_key: 'SPARE-KEY',
+      },
     },
   },
 };
@@ -103,9 +111,24 @@ const s2 = new AppStore({ dataDir: dir, baseConfig, log: null });
 eq('重启后 token 还在', s2.resolvedApps().find((a) => a.id === 'mail')?.auth?.token, 'UI-TOKEN');
 eq('重启后 key 还在', s2.resolvedProviders().deepseek.api_key, 'UI-KEY');
 
+console.log('\n[10] 删掉只存在于 config.json 的服务商');
+// 用户报过：界面点了删除，刷新一下它又回来了。原因是这类服务商来自 config.json，
+// 旧实现只从 overrides 里删，等于什么都没删。现在记一条墓碑。
+s2.saveSettings({ llm_default: 'spare' });
+s2.removeProvider('spare');
+ok('界面上确实没了', s2.providers().spare === undefined, JSON.stringify(Object.keys(s2.providers())));
+ok('给 llm 用的那份也不含它', s2.resolvedProviders().spare === undefined);
+eq('默认服务商指向它时被清空', s2.settings().llm_default, '');
+eq('config.json 本身没被改', baseConfig.llm.providers.spare?.model, 'spare-1');
+const s3 = new AppStore({ dataDir: dir, baseConfig, log: null });
+ok('重启后仍然是删掉的状态', s3.providers().spare === undefined);
+s3.upsertProvider({ id: 'spare', type: 'openai', base_url: 'https://spare.example/v1', model: 'spare-2' }, '');
+ok('重新添加同名就恢复显示（墓碑被撤销）', s3.providers().spare !== undefined);
+eq('重新添加后 key 沿用 config 那份', s3.resolvedProviders().spare.api_key, 'SPARE-KEY');
+
 // 出厂配置必须保持"空"：不带应用、不带任何 AI 厂商。
 // 写死几家厂商的后果是用户以为只支持那几家——名单一直在变，代码不该替用户决定。
-console.log('\n[10] 出厂配置不带任何厂商与应用');
+console.log('\n[11] 出厂配置不带任何厂商与应用');
 const example = JSON.parse(fs.readFileSync(new URL('../config.example.json', import.meta.url), 'utf8'));
 eq('providers 为空', Object.keys(example.llm?.providers || {}).length, 0);
 eq('default 为空', example.llm?.default || '', '');
@@ -113,7 +136,7 @@ eq('fallback 为空', (example.llm?.fallback || []).length, 0);
 eq('apps 为空', (example.apps || []).length, 0);
 ok('AI 兜底默认关闭', example.llm?.enabled === false);
 
-console.log('\n[11] 不合法的输入要被挡住');
+console.log('\n[12] 不合法的输入要被挡住');
 const rejects = (name, fn) => {
   let threw = false;
   try { fn(); } catch { threw = true; }

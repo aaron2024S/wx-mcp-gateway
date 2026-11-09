@@ -51,6 +51,9 @@ export class AppStore {
     this.overrides.apps ||= [];
     this.overrides.settings ||= {};
     this.overrides.providers ||= {};
+    // 界面删掉的「来自 config.json 的服务商」。config.json 是用户手写的、界面不改它，
+    // 所以只能用墓碑记号把它藏起来——否则删完一刷新又回来，看着像没删掉。
+    this.overrides.hiddenProviders ||= [];
     this.secrets.tokens ||= {};
     this.secrets.apiKeys ||= {};
   }
@@ -245,8 +248,10 @@ export class AppStore {
 
   providers() {
     const base = this.baseConfig.llm?.providers || {};
+    const hidden = new Set(this.overrides.hiddenProviders || []);
     const out = {};
     for (const [id, p] of Object.entries(base)) {
+      if (hidden.has(id)) continue;
       out[id] = {
         id,
         label: p.label || id,
@@ -258,6 +263,7 @@ export class AppStore {
       };
     }
     for (const [id, p] of Object.entries(this.overrides.providers)) {
+      if (hidden.has(id)) continue;
       out[id] = {
         ...p,
         id,
@@ -273,11 +279,14 @@ export class AppStore {
   // 只会表现为 AI 一直报鉴权失败，很难往"配置没生效"上想。
   resolvedProviders() {
     const base = this.baseConfig.llm?.providers || {};
+    const hidden = new Set(this.overrides.hiddenProviders || []);
     const out = {};
     for (const [id, p] of Object.entries(base)) {
+      if (hidden.has(id)) continue;
       out[id] = { ...p, api_key: this.secrets.apiKeys[id] || p.api_key || '' };
     }
     for (const [id, p] of Object.entries(this.overrides.providers)) {
+      if (hidden.has(id)) continue;
       // 界面只改了模型名、没重填 key 时，沿用 config.json 里那份
       out[id] = { ...p, api_key: this.secrets.apiKeys[id] || base[id]?.api_key || '' };
     }
@@ -300,6 +309,8 @@ export class AppStore {
     if (!clean.model) throw new Error('缺少 model');
 
     this.overrides.providers[id] = clean;
+    // 重新添加同 id 等于「撤销隐藏」，不然会加了个同名服务商却怎么都看不见
+    this.overrides.hiddenProviders = (this.overrides.hiddenProviders || []).filter((x) => x !== id);
     if (typeof apiKey === 'string' && apiKey.length) {
       this.secrets.apiKeys[id] = apiKey;
       this._saveSecrets();
@@ -309,15 +320,22 @@ export class AppStore {
   }
 
   removeProvider(id) {
+    // 两种来源两种删法：
+    //   · 界面加的 → 直接从 overrides 里去掉
+    //   · config.json 里的 → 不能改那个文件（可能是挂载进去的、也可能要留作底稿），
+    //     记一条墓碑，读取时跳过；用户手动把它从 config.json 删掉也不会冲突。
+    const fromUi = !!this.overrides.providers[id];
     delete this.overrides.providers[id];
+    if (!fromUi) {
+      const set = new Set(this.overrides.hiddenProviders || []);
+      set.add(id);
+      this.overrides.hiddenProviders = [...set];
+    }
     const had = !!this.secrets.apiKeys[id];
     delete this.secrets.apiKeys[id];
     if (had) this._saveSecrets();
+    if (this.overrides.settings.llm_default === id) this.overrides.settings.llm_default = '';
     this._saveOverrides();
-    if (this.overrides.settings.llm_default === id) {
-      this.overrides.settings.llm_default = '';
-      this._saveOverrides();
-    }
     return true;
   }
 }
