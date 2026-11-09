@@ -719,6 +719,28 @@ async function main() {
     ok('回序号不会跳到「读附件」', picked?.k === 'mail.read_message', JSON.stringify(picked));
     ok('挑中的工具带上了来源账号', picked?.a?.uid === 7 && picked?.a?.account === 'QQ邮箱', JSON.stringify(picked));
 
+    // ③b 搜出来/列出来的信不一定在收件箱。uid 只在「某账号的某文件夹」里唯一，
+    //     回序号时不带 folder，详情工具就会去 INBOX 里找一封在「已发送」的信。
+    const rendered3 = renderResult({ title: '搜索邮件' }, {
+      data: { messages: [{ uid: 11, subject: '已发出的合同', account: 'QQ邮箱', folder: 'Sent' }] },
+    });
+    const reg3 = {
+      tools: [
+        mk2({ key: 'mail.search_messages', name: 'search_messages' }),
+        mk2({
+          key: 'mail.read_message', name: 'read_message',
+          inputSchema: { type: 'object', properties: { uid: {}, account: {}, folder: {} }, required: ['uid'] },
+        }),
+      ],
+      find(k) { return this.tools.find((t) => t.key === k) || null; },
+    };
+    const ag3 = new Agent({ registry: reg3, config, sessions: new SessionStore({ log, confirmTtl: 60 }), log, hooks: {} });
+    let picked3 = null;
+    ag3._run = async (_c, k, a) => { picked3 = { k, a }; return { handled: true }; };
+    ag3.sessions.setLastList('p4', rendered3.items, 'mail.search_messages');
+    await ag3._openListItem('p4', rendered3.items[0], 'wechat', 'CTX');
+    ok('回序号连文件夹一起带上（否则不在收件箱的信找不到）', picked3?.a?.folder === 'Sent', JSON.stringify(picked3));
+
     // ④ 应用把校验失败原样抛回来时，不能把 zod 报文念给用户
     const bad = renderResult({ title: '读取附件内容' }, {
       isError: true,

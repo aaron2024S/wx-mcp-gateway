@@ -343,12 +343,18 @@ export function renderResult(tool, res, { limit = 8 } = {}) {
       const id = idOf(it);
       if (id) {
         const label = itemLine(it, i + 1).replace(/^\d+\.\s*/, '').split('  [')[0];
-        // uid 只在单个账号内唯一。跨账号列表（未读邮件就是典型）必须把账号一起记住，
-        // 否则用户回「1」之后下一步拿到 uid 也定位不到是哪封信。
-        const extra = id.key === 'uid' && typeof it.account === 'string' && it.account.trim()
-          ? { account: it.account }
-          : null;
-        items.push({ label, argKey: id.key, value: id.value, ...(extra ? { extra } : {}) });
+        // uid 只在单个账号、单个文件夹内唯一。跨账号列表（未读邮件就是典型）必须把账号
+        // 一起记住，否则用户回「1」之后下一步拿到 uid 也定位不到是哪封信；
+        // 搜出来 / 列出来的信不在收件箱时同理，得带上它所在的文件夹。
+        const extra = {};
+        if (id.key === 'uid') {
+          if (typeof it.account === 'string' && it.account.trim()) extra.account = it.account;
+          if (typeof it.folder === 'string' && it.folder.trim()) extra.folder = it.folder;
+        }
+        items.push({
+          label, argKey: id.key, value: id.value,
+          ...(Object.keys(extra).length ? { extra } : {}),
+        });
       }
     }
     if (found.list.length > shown.length) {
