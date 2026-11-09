@@ -585,6 +585,7 @@ const AI_ERR_HINTS = [
   [/timeout|超时|ETIMEDOUT/i, '请求超时——接口地址可能有误，或者这台机器出不了网'],
   [/ENOTFOUND|ECONNREFUSED|fetch failed|连不上/i, '连不上这个地址——检查接口地址与网络'],
   [/tool_choice/i, '该端点不认 tool_choice（已自动去掉重试）；仍失败说明它不支持函数调用'],
+  [/没有选出工具|没选|did not (call|select)/i, '模型没选任何工具——它可能不支持函数调用（tool calling），换一个支持的模型试试'],
 ];
 
 function explainAiError(msg) {
@@ -595,11 +596,20 @@ function explainAiError(msg) {
 
 // 「试一句」：把当前配置原样交给识别层跑一次（只决定、不执行），
 // 直接回答"我明明选了总是问 AI，为什么日志还是本地"。
-function probeText(r) {  const lines = [];
-  const path = r.via === 'llm' ? '<b style="color:var(--green)">AI</b> 认的'
-    : r.via === 'local' ? '<b>本地</b> 命中的'
-      : '没进到执行（给了候选菜单）';
+function probeText(r) {
+  const lines = [];
+  // 模型只回话、不选工具，是"AI 明明通了却不干活"的典型形态：
+  // 常见于不支持函数调用的模型，或用户那句话本身不是指令。
+  const chatted = r.via === 'llm' && !r.tool;
+  const path = chatted ? '<b style="color:var(--amber)">AI 通了，但没选工具</b>'
+    : r.via === 'llm' ? '<b style="color:var(--green)">AI</b> 认的'
+      : r.via === 'local' ? '<b>本地</b> 命中的'
+        : '没进到执行（给了候选菜单）';
   lines.push(`这句话走的是：${path}`);
+  if (chatted) {
+    lines.push('<span style="color:var(--amber)">模型只回了一句话，没调用任何工具——多半是它不支持函数调用，换一个支持的模型</span>');
+    if (r.reply) lines.push(`<span class="faint" style="font-size:11px">它说的是：${esc(r.reply)}</span>`);
+  }
 
   if (r.state && r.state.on === false) {
     lines.push(`<span style="color:var(--amber)">但 AI 现在根本不会生效：${esc(r.state.reason || '未启用')}</span>`);

@@ -59,7 +59,7 @@
 ```yaml
 services:
   wx-mcp-gateway:
-    image: aaron2024s/wx-mcp-gateway:0.3.2
+    image: aaron2024s/wx-mcp-gateway:0.3.3
     container_name: wx-mcp-gateway
     restart: unless-stopped
 
@@ -407,7 +407,7 @@ Node ≥ 20。
 ```bash
 npm test           # 端到端：假 iLink 网关 + 假 MCP + 假 AI 端点，83 项断言
 npm run test:auth  # 登录：起真服务走完设密码→登录→改密→锁定，56 项断言
-npm run test:llm   # AI 路由层：假 OpenAI/Anthropic 端点 + 模型清单 + 四档 llm_when + 用量归一化 + 工具名转义，43 项断言
+npm run test:llm   # AI 路由层：假 OpenAI/Anthropic 端点 + 模型清单 + 四档 llm_when + 用量归一化 + 工具名转义，46 项断言
 npm run test:store # 配置合并：三层覆盖顺序 + 凭据不外泄 + 删 config 里的服务商，40 项断言
 npm run demo       # 拉起真的 MailNest 跑一遍中文匹配
 ```

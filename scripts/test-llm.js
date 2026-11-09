@@ -81,6 +81,15 @@ const mock = http.createServer((req, res) => {
       return;
     }
 
+    // 只聊天、不调工具的模型（不支持 function calling 的那些）
+    if (req.url === '/chatty/chat/completions') {
+      res.end(JSON.stringify({
+        choices: [{ message: { role: 'assistant', content: '我只能陪你聊天，帮不了你' } }],
+        usage: { total_tokens: 9 },
+      }));
+      return;
+    }
+
     if (req.url === '/v1/models' || req.url === '/v1/models?limit=100') {
       // 模型清单：按鉴权头区分协议，顺手验我们发的头对不对
       if (req.headers.authorization === 'Bearer bad' || req.headers['x-api-key'] === 'bad') {
@@ -238,6 +247,16 @@ async function main() {
     try { await routeWithLLM({ text: '随便说点什么', tools: reg.llmTools(), config: cfg }); } catch (e) { err = e; }
     ok('只发一次请求', seen.length - before === 1, `${seen.length - before} 次`);
     ok('错误原文保留，能看出是哪个字段', /tools\[0\]\.function\.name/.test(err?.message || ''), err?.message);
+  }
+
+  console.log('\n=== 模型只回话、不选工具（不支持 tool calling 的典型形态）===');
+  {
+    const cfg = cfgWith({ type: 'openai', base_url: `http://127.0.0.1:${PORT}/chatty`, model: 'm', api_key: 'k' });
+    cfg.routing.llm_when = 'always';
+    const r = await route('有几封未读邮件', { registry: reg, config: cfg });
+    ok('结果是「说话」而不是执行', r.kind === 'say', String(r.kind));
+    ok('把模型原话带回来，界面才能说明它没干活', /只能陪你聊天/.test(r.text || ''), String(r.text));
+    ok('仍然是 via=llm（确实连上过，不是没接）', r.via === 'llm', String(r.via));
   }
 
   console.log('\n=== 失败与降级 ===');

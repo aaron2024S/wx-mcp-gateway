@@ -466,6 +466,9 @@ const ROUTES = [
       state,
       ms: Date.now() - started,
       kind: d.kind,
+      // 模型只回了话、没选工具时，把原话带回来——否则界面只能说"没选工具"，
+      // 用户完全看不出它到底在聊什么（常见于不支持 tool calling 的模型）。
+      reply: d.kind === 'say' ? String(d.text || '').slice(0, 120) : null,
       via: d.via || null,
       tool: d.tool ? (d.tool.title || d.tool.name) : null,
       toolKey: d.tool?.key || null,
