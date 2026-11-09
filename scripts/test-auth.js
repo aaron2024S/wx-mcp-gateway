@@ -174,7 +174,7 @@ ok('有盐', typeof saved.salt === 'string' && saved.salt.length >= 16);
 console.log('\n=== ③ 登录后 ===');
 const st1 = await req('GET', '/api/state');
 ok('业务接口可用', st1.status === 200 && typeof st1.json?.version === 'string', String(st1.status));
-ok('返回的版本是新的', st1.json?.version === '0.3.5', st1.json?.version);
+ok('返回的版本是新的', st1.json?.version === '0.3.6', st1.json?.version);
 
 const loginWhenIn = await req('GET', '/login');
 ok('已登录再访问 /login 会跳首页', loginWhenIn.status === 302 && loginWhenIn.location === '/', `${loginWhenIn.status} ${loginWhenIn.location}`);
