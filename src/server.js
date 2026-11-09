@@ -434,10 +434,16 @@ const ROUTES = [
       api_key: body.api_key || config.llm.providers[body.id]?.api_key || '',
     };
     const probeCfg = { llm: { enabled: true, default: '__probe', timeout: 20, max_tokens: 32, providers } };
+    // 样本用真实工具：只发一个叫 noop 的假工具的话，工具名与参数 schema 的问题
+    // 全被绕过去了 —— 结果是「测试连接」显示通了、一按「试一句」就 400，
+    // 等于测了个假的（工具名带点号被 DeepSeek 拒就是这么漏掉的）。
+    const sample = registry.llmTools();
     try {
       const r = await routeWithLLM({
         text: '回一个字：好',
-        tools: [{ name: 'noop', description: '什么都不做', inputSchema: { type: 'object', properties: {} } }],
+        tools: sample.length
+          ? sample.slice(0, 2)
+          : [{ name: 'noop', description: '什么都不做', inputSchema: { type: 'object', properties: {} } }],
         config: probeCfg,
       });
       return { ok: true, model: r.model, ms: r.ms, reply: (r.text || '').slice(0, 60) };

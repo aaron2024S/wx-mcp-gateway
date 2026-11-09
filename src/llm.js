@@ -115,6 +115,70 @@ export async function listModels({ type = 'openai', base_url, api_key = '', time
   return [...new Set(ids)];
 }
 
+// ---------- 工具名转义 ----------
+// OpenAI / DeepSeek / Anthropic 的 function name 都只接受 ^[a-zA-Z0-9_-]{1,64}$。
+// 我们的工具名是「应用.工具」（mail.list_messages），那个点号会被直接拒绝：
+//   Invalid 'tools[0].function.name': string does not match pattern ...
+// 而且现象极具误导性：添加服务商时「测试连接」用的是个叫 noop 的假工具（合法名），
+// 所以显示「通了 · 857 ms」，一按「试一句」换成真实工具清单就 400——看起来像是
+// 「测试连接在骗人」或者「根本没接上 AI」，其实只是名字没转义。
+// 出口转义、入口还原，上层拿到的永远是原始 key，注册表查找逻辑不受影响。
+const NAME_LIMIT = 64;
+
+function wireName(raw, used) {
+  let base = String(raw || '').replace(/[^a-zA-Z0-9_-]/g, '_') || 'tool';
+  if (base.length > NAME_LIMIT) base = base.slice(0, NAME_LIMIT);
+  let name = base;
+  let i = 2;
+  // 转义可能撞名（a.b 与 a_b 都编成 a_b），撞了加序号，宁可难看也不能丢工具
+  while (used.has(name)) name = `${base.slice(0, NAME_LIMIT - 4)}_${i++}`;
+  used.add(name);
+  return name;
+}
+
+function prepareTools(tools) {
+  const used = new Set();
+  const back = new Map();
+  const wire = tools.map((t) => {
+    const name = wireName(t.name, used);
+    back.set(name, t.name);
+    return { ...t, name, inputSchema: cleanSchema(t.inputSchema) };
+  });
+  return { wire, back };
+}
+
+function unwireName(back, name) {
+  if (!name) return null;
+  if (back.has(name)) return back.get(name);
+  const low = String(name).toLowerCase();
+  for (const [k, v] of back) if (k.toLowerCase() === low) return v;
+  return name;   // 模型编的名字原样上抛，由 registry.find() 丢弃
+}
+
+// 有些 MCP server 会把完整的 JSON Schema 元数据塞进参数定义，$schema / examples
+// 这类关键字在严格校验的端点上是 400 的来源。只删这两个，别的原样保留——
+// 多删可能把 $ref 的指向破坏掉。
+function cleanSchema(s) {
+  if (!s || typeof s !== 'object' || Array.isArray(s)) return { type: 'object', properties: {} };
+  const drop = new Set(['$schema', '$id', '$comment', 'examples']);
+  const out = {};
+  for (const [k, v] of Object.entries(s)) {
+    if (drop.has(k)) continue;
+    if (k === 'properties' && v && typeof v === 'object' && !Array.isArray(v)) {
+      out[k] = {};
+      for (const [pk, pv] of Object.entries(v)) out[k][pk] = cleanSchema(pv);
+    } else if (k === 'items') {
+      out[k] = cleanSchema(v);
+    } else if ((k === 'anyOf' || k === 'oneOf' || k === 'allOf') && Array.isArray(v)) {
+      out[k] = v.map((x) => cleanSchema(x));
+    } else {
+      out[k] = v;
+    }
+  }
+  if (out.type === 'object' && !out.properties) out.properties = {};
+  return out;
+}
+
 // ---------- OpenAI 兼容 ----------
 async function callOpenAI(text, tools, p, timeoutMs, maxTokens) {
   const headers = { ...p.headers };
@@ -142,14 +206,18 @@ async function callOpenAI(text, tools, p, timeoutMs, maxTokens) {
   try {
     json = await post(`${p.base_url}/chat/completions`, headers, { ...body, tool_choice: 'auto' }, timeoutMs);
   } catch (e) {
-    // 有些兼容端点不认 tool_choice，去掉再试一次
-    if (e.kind === 'http' && /tool_choice|unsupported|invalid/i.test(e.message)) {
+    // 有些兼容端点不认 tool_choice，去掉再试一次。
+    // 只认"明确提到 tool_choice"的报错 —— 原来还匹配了 /invalid/，
+    // 于是 Invalid 'tools[0].function.name' 这种参数本身的错也被当成
+    // "可能不支持 tool_choice"，白花一次请求还掩盖了真正原因。
+    if (e.kind === 'http' && /tool_choice/i.test(e.message)) {
       json = await post(`${p.base_url}/chat/completions`, headers, body, timeoutMs);
     } else throw e;
   }
 
   const msg = json?.choices?.[0]?.message;
-  const call = msg?.tool_calls?.[0];
+  // 老式 function_call（部分自建端点只实现了这个）也认一下
+  const call = msg?.tool_calls?.[0] || (msg?.function_call ? { function: msg.function_call } : null);
   if (!call) {
     return { tool: null, text: msg?.content || '', usage: json?.usage || null };
   }
@@ -234,14 +302,17 @@ export async function routeWithLLM({ text, tools, config, providerId }) {
   const failures = [];
   const errors = [];
 
+  // 转义只跟工具清单有关、跟服务商无关，循环外做一次
+  const prepared = prepareTools(tools);
+
   for (const p of list) {
     const adapter = ADAPTERS[p.type];
     if (!adapter) { failures.push(`${p.id}: 不支持的协议 ${p.type}`); continue; }
     const started = Date.now();
     try {
-      const r = await adapter(text, tools, p, timeoutMs, maxTokens);
+      const r = await adapter(text, prepared.wire, p, timeoutMs, maxTokens);
       return {
-        tool: r.tool,
+        tool: unwireName(prepared.back, r.tool),
         args: r.args || {},
         text: r.text || '',
         via: 'llm',

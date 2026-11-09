@@ -17,6 +17,12 @@ const ok = (name, cond, extra = '') => {
   else { fail++; console.log('  ✗ ' + name + (extra ? '  ' + extra : '')); }
 };
 
+// 假模型选工具：只从"实际收到的清单"里挑，真模型也只能这样。
+function pickName(names, wantDelete) {
+  const hit = names.find((n) => /delete/.test(n) === wantDelete);
+  return hit || names[0] || (wantDelete ? 'fake_delete' : 'fake_send');
+}
+
 const mock = http.createServer((req, res) => {
   let body = '';
   req.on('data', (c) => { body += c; });
@@ -29,9 +35,11 @@ const mock = http.createServer((req, res) => {
     if (req.url === '/v1/chat/completions') {
       const hasTools = Array.isArray(j.tools) && j.tools.length > 0;
       if (!hasTools) { res.statusCode = 400; res.end(JSON.stringify({ error: { message: 'no tools' } })); return; }
-      // 模拟模型：根据用户说的话挑一个工具
+      // 模拟模型：只可能从"我们实际发给它的名字"里挑（真模型就是这么干的）。
+      // 早先这里是硬编码 'fake.send'，于是名字转义一旦出错也测不出来。
       const said = j.messages?.at(-1)?.content || '';
-      const name = /删/.test(said) ? 'fake.delete' : 'fake.send';
+      const names = j.tools.map((t) => t.function?.name).filter(Boolean);
+      const name = pickName(names, /删/.test(said));
       res.end(JSON.stringify({
         choices: [{
           message: {
@@ -51,13 +59,24 @@ const mock = http.createServer((req, res) => {
 
     if (req.url === '/v1/messages') {
       const said = j.messages?.[0]?.content || '';
-      const name = /删/.test(said) ? 'fake.delete' : 'fake.send';
+      const names = (j.tools || []).map((t) => t.name).filter(Boolean);
+      const name = pickName(names, /删/.test(said));
       res.end(JSON.stringify({
         content: [
           { type: 'text', text: '好的' },
           { type: 'tool_use', id: 'tu_1', name, input: { to: 'a@b.com' } },
         ],
         usage: { input_tokens: 20, output_tokens: 8 },
+      }));
+      return;
+    }
+
+    // 严格端点：参数名不合规时直接 400（DeepSeek 就是这么回的点号工具名）。
+    // 用来钉住"别把 invalid 当成 tool_choice 不支持而白重试一次"。
+    if (req.url === '/strict/chat/completions') {
+      res.statusCode = 400;
+      res.end(JSON.stringify({
+        error: { message: `Invalid 'tools[0].function.name': string does not match pattern. Expected a string that matches the pattern '^[a-zA-Z0-9_-]+$'.` },
       }));
       return;
     }
@@ -87,7 +106,14 @@ const FAKE_TOOLS = [
   {
     key: 'fake.send', name: 'send', title: '发送消息',
     description: '把一条消息发送给指定的人',
-    inputSchema: { type: 'object', properties: { to: { type: 'string' } }, required: ['to'] },
+    // 故意带上 $schema：MCP server 常常原样转发，严格端点会因此 400
+    inputSchema: {
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      title: 'SendArgs',
+      type: 'object',
+      properties: { to: { type: 'string' } },
+      required: ['to'],
+    },
     annotations: { readOnlyHint: false },
   },
   {
@@ -152,6 +178,9 @@ async function main() {
     ok('带了 Bearer 鉴权', String(req.headers.authorization || '') === 'Bearer sk-test');
     ok('tools 按 function 格式下发', req.body.tools?.[0]?.type === 'function' && !!req.body.tools[0].function?.parameters);
     ok('temperature 为 0（要确定性）', req.body.temperature === 0);
+    const params = (req.body.tools.find((t) => /send/.test(t.function.name)) || req.body.tools[0]).function.parameters;
+    ok('参数 schema 的 $schema 被剔除（严格端点会因此 400）',
+      params.$schema === undefined && !!params.properties?.to, JSON.stringify(params));
   }
 
   console.log('\n=== Anthropic 协议 ===');
@@ -168,6 +197,47 @@ async function main() {
     ok('带了 x-api-key 头', String(req.headers['x-api-key'] || '') === 'ak-test');
     ok('带了 anthropic-version 头', !!req.headers['anthropic-version']);
     ok('tools 按 input_schema 格式下发', !!req.body.tools?.[0]?.input_schema);
+  }
+
+  console.log('\n=== 工具名转义（点号会被 DeepSeek/OpenAI 直接拒）===');
+  {
+    const cfg = cfgWith({ type: 'openai', base_url: `http://127.0.0.1:${PORT}/v1`, model: 'mock-1', api_key: 'k' });
+    const tools = [
+      {
+        name: 'mail.list_messages', description: '列出邮件',
+        inputSchema: {
+          $schema: 'http://json-schema.org/draft-07/schema#', type: 'object',
+          properties: { q: { type: 'string' } },
+        },
+      },
+      { name: 'mail_list_messages', description: '撞名样本：转义后和上一条同形', inputSchema: { type: 'object', properties: {} } },
+      { name: 'mail.read_attachment', description: '读附件', inputSchema: { type: 'object', properties: {} } },
+    ];
+    const r = await routeWithLLM({ text: '读一下附件', tools, config: cfg });
+    const req = seen.at(-1);
+    const sent = req.body.tools.map((t) => t.function.name);
+    ok('发出去的名字全部合规（^[a-zA-Z0-9_-]{1,64}$）',
+      sent.every((n) => /^[a-zA-Z0-9_-]{1,64}$/.test(n)), sent.join(','));
+    ok('名字里不再有点号', !sent.some((n) => n.includes('.')), sent.join(','));
+    // 撞名不处理的话两个工具会编成同一个名字，模型永远选不中后者
+    ok('转义撞名时自动加序号，工具一个不丢',
+      sent.length === 3 && new Set(sent).size === 3, sent.join(','));
+    ok('返回的名字还原成原始 key', r.tool === 'mail.list_messages', String(r.tool));
+    ok('参数 schema 的 $schema 被剔除、properties 保留',
+      req.body.tools[0].function.parameters.$schema === undefined
+      && !!req.body.tools[0].function.parameters.properties?.q);
+  }
+
+  console.log('\n=== 参数被拒时别当成「不支持 tool_choice」重发 ===');
+  {
+    // 原来的重试条件里带 /invalid/，于是 "Invalid 'tools[0].function.name'"
+    // 这种参数本身的错也会被当成"可能不认 tool_choice"，白花一次请求还掩盖真因。
+    const cfg = cfgWith({ type: 'openai', base_url: `http://127.0.0.1:${PORT}/strict`, model: 'm', api_key: 'k' });
+    const before = seen.length;
+    let err = null;
+    try { await routeWithLLM({ text: '随便说点什么', tools: reg.llmTools(), config: cfg }); } catch (e) { err = e; }
+    ok('只发一次请求', seen.length - before === 1, `${seen.length - before} 次`);
+    ok('错误原文保留，能看出是哪个字段', /tools\[0\]\.function\.name/.test(err?.message || ''), err?.message);
   }
 
   console.log('\n=== 失败与降级 ===');

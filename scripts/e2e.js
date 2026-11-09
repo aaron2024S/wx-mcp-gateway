@@ -203,14 +203,27 @@ function mockLlm() {
     let buf = '';
     req.on('data', (c) => { buf += c; });
     req.on('end', () => {
-      seen.push({ path: req.url, body: JSON.parse(buf || '{}') });
+      const body = JSON.parse(buf || '{}');
+      seen.push({ path: req.url, body });
+      // 像 DeepSeek / OpenAI 那样校验 function name 的字符集。
+      // 名字转义一旦坏掉（我们内部用的是「应用.工具」，点号不合法），
+      // 这里立刻 400 —— 而不是等用户点「试一句」才发现 AI 根本没通。
+      const names = (body.tools || []).map((t) => t.function?.name).filter(Boolean);
+      const bad = names.find((n) => !/^[a-zA-Z0-9_-]{1,64}$/.test(n));
+      if (bad) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: { message: `Invalid 'tools[0].function.name': ${bad}` } }));
+        return;
+      }
+      // 模型只会从发给它的清单里挑，且报回来的是转义后的名字
+      const pick = names.find((n) => /list_messages/.test(n)) || names[0] || 'list_messages';
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
         choices: [{
           message: {
             role: 'assistant',
             content: null,
-            tool_calls: [{ id: 'c1', type: 'function', function: { name: 'list_messages', arguments: '{}' } }],
+            tool_calls: [{ id: 'c1', type: 'function', function: { name: pick, arguments: '{}' } }],
           },
         }],
         usage: { prompt_tokens: 812, completion_tokens: 43, total_tokens: 855 },
@@ -458,6 +471,13 @@ async function main() {
     for (let i = 0; i < 40 && !outbox.length; i++) await sleep(100);
 
     ok('本地没听懂时确实问了 AI', llm.seen.length === 1, `${llm.seen.length} 次`);
+    // 这一条钉的是「AI 根本不能用」的整类故障：内部工具名是「应用.工具」，
+    // 点号不合法，DeepSeek 会回 Invalid 'tools[0].function.name'。
+    // 假端点现在会像真端点一样校验，转义坏了这里立刻红。
+    const sentNames = (llm.seen[0]?.body?.tools || []).map((t) => t.function?.name).filter(Boolean);
+    ok('发给 AI 的工具名合法（否则 DeepSeek 直接 400）',
+      sentNames.length > 0 && sentNames.every((n) => /^[a-zA-Z0-9_-]{1,64}$/.test(n)),
+      sentNames.join(','));
     const rec = logged.at(-1);
     ok('AI 选中的调用记为 via=llm', rec?.via === 'llm', String(rec?.via));
     ok('带上服务商与模型', rec?.provider === 'mock' && rec?.model === 'deepseek-flash', `${rec?.provider}/${rec?.model}`);

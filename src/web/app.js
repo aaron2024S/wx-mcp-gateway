@@ -574,10 +574,28 @@ bindSetting('#setLlmWhen', 'llm_when', undefined, renderLlmWhenHint);
 bindSetting('#setConfirmRisk', 'confirm_risk', (v) => (v ? v.split(',') : []));
 bindSetting('#setLlmDefault', 'llm_default', (v) => v || '');
 
+// 服务商的报错是英文、且通常只说「哪个字段不合法」，用户既看不懂也改不了。
+// 这里给常见几类补一句人话，原文另外用小字保留——排查时它仍是最准的线索。
+const AI_ERR_HINTS = [
+  [/function\.name|tools\[\d+\]/i, '工具名格式被服务商拒绝。网关会自动转义工具名，出现在这里说明有漏网的工具，请反馈'],
+  [/401|403|invalid.*api.?key|incorrect api key|unauthorized/i, 'API Key 不对、已失效，或没有这个模型的权限'],
+  [/404|model.*(not|does not).*exist|model_not_found|unknown model/i, '模型名不存在——点「拉取列表」挑一个现成的，别手打'],
+  [/insufficient|quota|balance|余额|欠费/i, '账户余额或额度不足'],
+  [/429|rate.?limit/i, '触发频率限制，等一会儿再试'],
+  [/timeout|超时|ETIMEDOUT/i, '请求超时——接口地址可能有误，或者这台机器出不了网'],
+  [/ENOTFOUND|ECONNREFUSED|fetch failed|连不上/i, '连不上这个地址——检查接口地址与网络'],
+  [/tool_choice/i, '该端点不认 tool_choice（已自动去掉重试）；仍失败说明它不支持函数调用'],
+];
+
+function explainAiError(msg) {
+  const s = String(msg || '');
+  const hit = AI_ERR_HINTS.find(([re]) => re.test(s));
+  return hit ? hit[1] : '';
+}
+
 // 「试一句」：把当前配置原样交给识别层跑一次（只决定、不执行），
 // 直接回答"我明明选了总是问 AI，为什么日志还是本地"。
-function probeText(r) {
-  const lines = [];
+function probeText(r) {  const lines = [];
   const path = r.via === 'llm' ? '<b style="color:var(--green)">AI</b> 认的'
     : r.via === 'local' ? '<b>本地</b> 命中的'
       : '没进到执行（给了候选菜单）';
@@ -599,7 +617,10 @@ function probeText(r) {
   }
   lines.push(bits.join(' · '));
   if (r.aiError) {
-    lines.push(`<span style="color:var(--red)">AI 没接上：${esc(r.aiError)}</span>`);
+    const hint = explainAiError(r.aiError);
+    lines.push(hint
+      ? `<span style="color:var(--red)">AI 没接上：${esc(hint)}</span><br><span class="faint" style="font-size:11px">服务商原文：${esc(r.aiError)}</span>`
+      : `<span style="color:var(--red)">AI 没接上：${esc(r.aiError)}</span>`);
   }
   if (r.candidates?.length) {
     lines.push(`候选：${esc(r.candidates.join(' / '))}`);
@@ -889,7 +910,8 @@ $('#pvTest').onclick = async () => {
       out.textContent = `通了 · ${r.model} · ${r.ms} ms`;
     } else {
       out.style.color = 'var(--red)';
-      out.textContent = r.message;
+      const hint = explainAiError(r.message);
+      out.textContent = hint ? `${hint}（${r.message}）` : r.message;
     }
   } catch (e) { out.style.color = 'var(--red)'; out.textContent = e.message; }
 };
