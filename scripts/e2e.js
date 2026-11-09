@@ -468,10 +468,49 @@ async function main() {
     const row = formatCall(rec || {});
     ok('落盘记录带 token 三件套', row.tokIn === 812 && row.tokOut === 43 && row.tok === 855, JSON.stringify(row));
 
+    // 「总是先问 AI」这一档的核心承诺：本地明明认得出，也必须先交给 AI。
+    // 少了这条断言，"选了总是问 AI 却还是本地"这种回归没人挡得住。
+    config.routing.llm_when = 'always';
+    llm.seen.length = 0;
+    outbox.length = 0;
+    il.push({ from_user_id: 'wxid_me', context_token: 'CTX-AL', msg_id: 'mAL', item_list: [{ type: 1, text_item: { text: '列出邮箱账号' } }] });
+    for (let i = 0; i < 40 && !outbox.length; i++) await sleep(100);
+
+    ok('总是问 AI：本地能命中也要先问 AI', llm.seen.length === 1, `${llm.seen.length} 次`);
+    const recA = logged.at(-1);
+    ok('总是问 AI：用的是 AI 选的那个工具', recA?.via === 'llm' && recA?.tool?.name === 'list_messages',
+      `${recA?.via}/${recA?.tool?.name}`);
+    ok('总是问 AI：这种记录没有降级标记', !recA?.aiError, String(recA?.aiError));
+
     // 还原，别把 AI 开着影响后面几条
     config.llm = { enabled: false, providers: {} };
     config.routing.llm_when = 'never';
     llm.server.close();
+  }
+
+  console.log('\n=== ④i AI 挂了要说明为什么退回本地 ===');
+  {
+    // 用户设了「总是先问 AI」，日志却写"本地"——如果不说原因，只能得出
+    // "设置没生效"这个错误结论。这里让 AI 必然失败，验证降级路径留下证据。
+    config.llm = {
+      enabled: true, default: 'dead', timeout: 3, max_tokens: 64,
+      providers: { dead: { type: 'openai', base_url: 'http://127.0.0.1:9', model: 'x', api_key: 'k' } },
+    };
+    config.routing.llm_when = 'always';
+
+    outbox.length = 0;
+    il.push({ from_user_id: 'wxid_me', context_token: 'CTX-D', msg_id: 'mD', item_list: [{ type: 1, text_item: { text: '列出邮箱账号' } }] });
+    for (let i = 0; i < 60 && !outbox.length; i++) await sleep(100);
+
+    const rec = logged.at(-1);
+    ok('AI 挂了仍然回落到本地执行', rec?.via === 'local', String(rec?.via));
+    ok('记录里带着失败原因', !!rec?.aiError, String(rec?.aiError));
+    const row = formatCall(rec || {});
+    ok('落盘记录也带原因（界面靠它显示降级）', !!row.aiErr, String(row.aiErr));
+    ok('原因不会撑爆一条日志', (row.aiErr || '').length <= 160, String((row.aiErr || '').length));
+
+    config.llm = { enabled: false, providers: {} };
+    config.routing.llm_when = 'never';
   }
 
   console.log('\n=== ④h 两个页面都要有标签页图标 ===');

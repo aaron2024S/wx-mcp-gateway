@@ -183,6 +183,14 @@ const s1 = await req('GET', '/api/auth/session');
 ok('session 说已登录', s1.json?.loggedIn === true);
 ok('session 不再暴露会话数量之类', s1.json?.sessionCount === undefined);
 
+// 自检接口：没配 AI 时必须如实说"不会生效"，而不是装作走了 AI
+const probe = await req('POST', '/api/llm/probe', { text: '有几封未读邮件' });
+ok('自检接口可用', probe.status === 200 && probe.json?.state, `${probe.status}`);
+ok('没配 AI 时说清楚不会生效', probe.json?.state?.on === false && /开关|服务商/.test(probe.json?.state?.reason || ''),
+  JSON.stringify(probe.json?.state));
+ok('自检报告了当前档位', typeof probe.json?.state?.mode === 'string', String(probe.json?.state?.mode));
+ok('自检只给结论、不执行工具', probe.json?.via !== 'llm' || probe.json?.state?.on === true, JSON.stringify(probe.json));
+
 // 重复设置密码必须被拒（first-run takeover 的兜底）
 const again = await req('POST', '/api/auth/setup', { password: 'another123', confirm: 'another123' });
 ok('重复设置被拒', again.status === 409 && again.json?.code === 'already_initialized', `${again.status} ${JSON.stringify(again.json)}`);

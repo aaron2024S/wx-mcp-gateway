@@ -143,10 +143,31 @@ function viaCell(r) {
     const tip = [r.provider, r.model].filter(Boolean).join(' / ') || 'AI 识别';
     return `<span class="badge ai" title="由 AI 识别：${esc(tip)}">AI</span>`;
   }
-  if (r.via === 'local') return '<span class="badge ghost" title="本地索引命中，没调用 AI，不产生费用">本地</span>';
+  if (r.via === 'local') {
+    // 开了「总是问 AI」却回落到本地：必须显形，否则用户看到一行干净的"本地"，
+    // 永远想不到 AI 其实报错/超时了。
+    if (r.aiErr) {
+      return `<span class="badge warn" title="本该由 AI 识别，但没接上，已回落本地：${esc(r.aiErr)}">本地·降级</span>`;
+    }
+    return '<span class="badge ghost" title="本地索引命中，没调用 AI，不产生费用">本地</span>';
+  }
   if (r.via === 'ref') return '<span class="badge ghost" title="引用上一轮列表里的序号">列表</span>';
   if (r.trigger === 'console') return '<span class="badge ghost">手动</span>';
   return '<span class="faint">—</span>';
+}
+
+// 落盘的是 UTC ISO 串，直接 slice 出来的是格林尼治时间，跟用户手机差 8 小时，
+// 跨零点还会显得"排序乱了"。一律按浏览器本地时区显示，非今天的补上月-日。
+function clockOf(iso) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return { text: '--:--:--', full: '' };
+  const p = (n) => String(n).padStart(2, '0');
+  const hms = `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  const full = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${hms}`;
+  const now = new Date();
+  const sameDay = d.getFullYear() === now.getFullYear()
+    && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+  return { text: sameDay ? hms : `${p(d.getMonth() + 1)}-${p(d.getDate())} ${hms}`, full };
 }
 
 function fmtTok(n) {
@@ -174,15 +195,15 @@ function tokCell(r) {
 
 function logTable(rows, compact) {
   if (!rows.length) return '<div class="empty">还没有调用记录</div>';
-  const head = `<thead><tr><th style="width:76px">时间</th><th style="width:58px">触发</th>
-    <th style="width:66px">应用</th><th>工具</th><th style="width:56px">识别</th>
-    <th style="width:72px">Token</th><th style="width:60px">结果</th>
+  const head = `<thead><tr><th style="width:96px">时间</th><th style="width:58px">触发</th>
+    <th style="width:66px">应用</th><th>工具</th><th style="width:84px">识别</th>
+    <th style="width:66px">Token</th><th style="width:58px">结果</th>
     <th style="width:64px">耗时</th></tr></thead>`;
   const body = rows.map((r) => {
-    const t = String(r.t || '').slice(11, 19);
+    const t = clockOf(r.t);
     const ok = r.ok ? '<span class="ok">成功</span>'
       : `<span class="err" title="${esc(r.err || '')}">失败</span>`;
-    return `<tr><td class="nowrap">${t}</td><td>${esc(TRIGGER[r.trigger] || r.trigger || '')}</td>
+    return `<tr><td class="nowrap" title="${esc(t.full)}">${t.text}</td><td>${esc(TRIGGER[r.trigger] || r.trigger || '')}</td>
       <td class="strong">${esc(r.app || '')}</td>
       <td><span class="mono">${esc(r.tool || '')}</span></td>
       <td class="nowrap">${viaCell(r)}</td>
@@ -449,8 +470,22 @@ function renderLlmWhenHint() {
   const el = $('#setLlmWhen');
   const hint = $('#setLlmWhenHint');
   if (!el || !hint) return;
-  const off = S.data?.settings?.llm_enabled !== true ? '（AI 兜底当前是关的，这一档暂时不起作用）' : '';
-  hint.textContent = off + (LLM_WHEN_TEXT[el.value] || LLM_WHEN_TEXT.miss);
+  const mode = el.value;
+  const s = S.data?.settings || {};
+  const hasProv = $$('#provList .tool-line').length > 0;
+
+  // 选了「问 AI」但根本问不出去——这是"我明明设了怎么还是本地"的头号原因，
+  // 提示必须显眼，不能缩在一行灰字里。
+  let warn = '';
+  if (mode !== 'never') {
+    if (s.llm_enabled !== true) warn = 'AI 兜底是关的，这一档不会生效：先把上面「启用 AI 兜底」打开。';
+    else if (!hasProv) warn = '还没有服务商，这一档不会生效：点右上角「添加服务商」。';
+  }
+  if (warn) {
+    hint.innerHTML = `<span style="color:var(--amber)">${esc(warn)}</span>`;
+  } else {
+    hint.textContent = LLM_WHEN_TEXT[mode] || LLM_WHEN_TEXT.miss;
+  }
 }
 
 function fillSettings() {
@@ -499,6 +534,8 @@ async function loadProviders() {
       };
     });
   } catch { /* 未授权时静默 */ }
+  // 服务商数量会影响上面那条警告（"还没配服务商"），列表刷完再算一次
+  renderLlmWhenHint();
 }
 
 // 设置项改动即保存（不用"保存"按钮，少一次点击也少一次忘点）
@@ -532,6 +569,58 @@ bindSetting('#setLlmEnabled', 'llm_enabled', (v) => v === true, (on) => {
 bindSetting('#setLlmWhen', 'llm_when', undefined, renderLlmWhenHint);
 bindSetting('#setConfirmRisk', 'confirm_risk', (v) => (v ? v.split(',') : []));
 bindSetting('#setLlmDefault', 'llm_default', (v) => v || '');
+
+// 「试一句」：把当前配置原样交给识别层跑一次（只决定、不执行），
+// 直接回答"我明明选了总是问 AI，为什么日志还是本地"。
+function probeText(r) {
+  const lines = [];
+  const path = r.via === 'llm' ? '<b style="color:var(--green)">AI</b> 认的'
+    : r.via === 'local' ? '<b>本地</b> 命中的'
+      : '没进到执行（给了候选菜单）';
+  lines.push(`这句话走的是：${path}`);
+
+  if (r.state && r.state.on === false) {
+    lines.push(`<span style="color:var(--amber)">但 AI 现在根本不会生效：${esc(r.state.reason || '未启用')}</span>`);
+  }
+  if (r.tool) {
+    lines.push(`工具：${esc(r.tool)}${r.toolKey ? ` <span class="mono" style="font-size:11px">${esc(r.toolKey)}</span>` : ''}`);
+  }
+  if (r.provider || r.model) {
+    lines.push(`服务商：${esc([r.provider, r.model].filter(Boolean).join(' · '))}`);
+  }
+  const bits = [`耗时 ${r.ms} ms`];
+  if (r.usage) {
+    const t = r.usage.total ?? ((r.usage.input || 0) + (r.usage.output || 0));
+    bits.push(`${t} token`);
+  }
+  lines.push(bits.join(' · '));
+  if (r.aiError) {
+    lines.push(`<span style="color:var(--red)">AI 没接上：${esc(r.aiError)}</span>`);
+  }
+  if (r.candidates?.length) {
+    lines.push(`候选：${esc(r.candidates.join(' / '))}`);
+  }
+  return lines.join('<br>');
+}
+
+function bindProbe() {
+  const btn = $('#probeBtn');
+  const out = $('#probeOut');
+  if (!btn || !out) return;
+  btn.onclick = async () => {
+    btn.disabled = true;
+    out.style.display = 'block';
+    out.innerHTML = '正在试…（走 AI 的话要等一两秒）';
+    try {
+      const r = await api('/api/llm/probe', { method: 'POST', body: { text: '有几封未读邮件' } });
+      out.innerHTML = probeText(r);
+    } catch (e) {
+      out.innerHTML = `<span style="color:var(--red)">${esc(e.message)}</span>`;
+    }
+    btn.disabled = false;
+  };
+}
+bindProbe();
 
 // ---- 添加/编辑应用向导 ------------------------------------------------
 

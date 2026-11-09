@@ -196,6 +196,14 @@
         <select id="setLlmDefault"></select>
       </div>
       <div id="provList" style="margin-top:6px"></div>
+      <div class="set-row" style="margin-top:10px; margin-bottom:0">
+        <div class="grow">
+          <div style="font-size:13px">自检</div>
+          <div class="hint" id="probeHint">用一句真话走一遍识别层（只决定、不执行），看它到底走本地还是走 AI</div>
+        </div>
+        <button class="btn ghost" id="probeBtn">试一句</button>
+      </div>
+      <div class="hint" id="probeOut" style="display:none; margin-top:8px; line-height:1.7"></div>
     </div>
     <div class="section-title">安全<span class="line"></span></div>
     <div class="card">

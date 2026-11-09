@@ -20,6 +20,7 @@ import { Agent } from './agent.js';
 import { IlinkClient, DEFAULT_BASE } from './ilink.js';
 import { checkRisk, runTool, renderResult, riskLabel } from './exec.js';
 import { routeWithLLM, listModels } from './llm.js';
+import { route, llmState } from './router.js';
 import { formatCall } from './calllog.js';
 import {
   Auth, AuthError, COOKIE_NAME, MIN_PASSWORD,
@@ -440,6 +441,33 @@ const ROUTES = [
     } catch (e) {
       return { ok: false, message: errText(e) };
     }
+  }],
+
+  // 全链路自检：一句真话走一遍识别层（只决定、不执行），把"到底走没走 AI、
+  // 为什么没走"一次说清。用户开了「总是先问 AI」却看到日志写"本地"时，
+  // 这里能直接看到是开关没开、没服务商，还是 key/model 报错。
+  ['POST', /^\/api\/llm\/probe$/, async (req) => {
+    const body = await readBody(req);
+    const text = String(body.text || '').trim().slice(0, 200) || '查一下我的未读邮件';
+    const state = llmState(config);
+    const started = Date.now();
+    const d = await route(text, { registry, config });
+    return {
+      text,
+      state,
+      ms: Date.now() - started,
+      kind: d.kind,
+      via: d.via || null,
+      tool: d.tool ? (d.tool.title || d.tool.name) : null,
+      toolKey: d.tool?.key || null,
+      args: d.args || null,
+      provider: d.provider || null,
+      model: d.model || null,
+      usage: d.usage || null,
+      // 没走 AI 的原因：没开 / 没服务商 / 调用报错 / AI 选了个不存在的工具
+      aiError: d.aiError || (d.kind === 'menu' ? d.note || null : null),
+      candidates: (d.candidates || []).slice(0, 3).map((c) => c.label),
+    };
   }],
 
   ['GET', /^\/api\/wechat\/status$/, () => wechatView()],

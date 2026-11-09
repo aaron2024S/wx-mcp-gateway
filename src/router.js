@@ -28,7 +28,7 @@ async function tryLLM(text, registry, config, local) {
     if (!r.tool) {
       // 模型决定不调工具，只回了句话
       return r.text
-        ? { kind: 'say', text: r.text, via: 'llm', provider: r.provider, ms: r.ms }
+        ? { kind: 'say', text: r.text, via: 'llm', provider: r.provider, model: r.model, ms: r.ms, usage: r.usage }
         : { kind: 'none', error: 'AI 没有选出工具' };
     }
     const tool = registry.find(r.tool);
@@ -52,6 +52,24 @@ async function tryLLM(text, registry, config, local) {
   }
 }
 
+// 当前这套配置下，AI 到底会不会被叫起来。设置页的「自检」直接拿它，
+// 免得把"enabled 判断"抄两遍、抄歪了还查不出来。
+export function llmState(config) {
+  const providers = Object.keys(config.llm?.providers || {});
+  const on = config.llm?.enabled === true && providers.length > 0;
+  return {
+    on,
+    mode: config.routing?.llm_when || 'miss',
+    providers,
+    default: config.llm?.default || providers[0] || '',
+    onError: config.llm?.on_error || 'local',
+    // 开了开关但没服务商 = 最常见的"我明明开了呀"
+    reason: on ? null
+      : (config.llm?.enabled !== true ? '「启用 AI 兜底」开关是关的' : '没有可用的 AI 服务商'),
+  };
+}
+
+
 /**
  * @returns {{kind:'call'|'say'|'menu', ...}}
  *   call: {tool, args, via:'local'|'llm', score?, provider?, ms?}
@@ -60,17 +78,27 @@ async function tryLLM(text, registry, config, local) {
  */
 export async function route(text, { registry, config }) {
   const local = registry.match(text);
-  const llmOn = config.llm?.enabled === true && Object.keys(config.llm?.providers || {}).length > 0;
-  const mode = config.routing?.llm_when || 'miss';
+  const st = llmState(config);
+  const llmOn = st.on;
+  const mode = st.mode;
 
   // ① AI 优先模式：先问 AI，失败再回落本地
   if (llmOn && mode === 'always') {
     const r = await tryLLM(text, registry, config, local);
     if (r.kind === 'call' || r.kind === 'say') return r;
+    // 回落也要留下证据：用户开了「总是问 AI」却看到日志写"本地"，不给原因就没法查。
     if (local.confident) {
-      return { kind: 'call', tool: local.best.tool, args: {}, via: 'local', score: local.best.score, note: r.error };
+      return {
+        kind: 'call',
+        tool: local.best.tool,
+        args: {},
+        via: 'local',
+        score: local.best.score,
+        degraded: true,
+        aiError: r.error || 'AI 没有给出可用的工具',
+      };
     }
-    return { kind: 'menu', candidates: menuList(registry, local), note: r.error };
+    return { kind: 'menu', candidates: menuList(registry, local), note: r.error, aiError: r.error };
   }
 
   // ② 本地自信：直接执行，不惊动 AI。

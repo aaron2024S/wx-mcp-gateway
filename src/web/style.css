@@ -134,6 +134,7 @@
   .badge.high{background:var(--red-soft); color:var(--red)}
   .badge.ghost{background:transparent; border-color:var(--border); color:var(--text-dim)}
   .badge.ai{background:var(--accent-soft); color:var(--accent)}
+  .badge.warn{background:var(--amber-soft); color:var(--amber); border:1px solid color-mix(in srgb, var(--amber) 32%, transparent)}
   .btn{
     font:inherit; font-size:13px; padding:7px 14px; border-radius:8px;
     border:1px solid var(--border); background:var(--surface-2); color:var(--text);

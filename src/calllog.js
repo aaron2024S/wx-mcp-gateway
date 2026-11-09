@@ -47,5 +47,8 @@ export function formatCall(rec) {
     tokIn,
     tokOut,
     tok,
+    // 只有「本该问 AI 但 AI 没接上、回落本地」才有值。不写进日志的话，
+    // 用户看到的就是一行干净的"本地"，完全不知道 AI 其实失败了。
+    aiErr: rec.aiError ? String(rec.aiError).slice(0, 160) : null,
   };
 }

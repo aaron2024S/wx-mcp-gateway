@@ -24,6 +24,8 @@ function metaFields(meta) {
     provider: m.provider || null,
     model: m.model || null,
     usage: m.usage || null,
+    // 开了「总是问 AI」但 AI 没接上时，这里留着原文原因；界面据此显示"降级"
+    aiError: m.aiError || null,
   };
 }
 
@@ -131,6 +133,9 @@ export class Agent {
 
     if (decision.kind === 'say') return say(decision.text);
     if (decision.kind === 'call') {
+      // 落到容器日志里留一条：界面上的"降级"徽章只有鼠标悬停才看得到原文，
+      // 而"为什么没走 AI"经常要靠 docker logs 才能查清（key 过期、超时）。
+      if (decision.aiError) this.log?.warn?.('route', `AI 没接上，已回落本地：${decision.aiError}`);
       // 只带「这次是谁认的 + 花了多少」，不要把整个 decision（含工具 schema）塞进会话里
       const meta = {
         via: decision.via,
@@ -138,6 +143,7 @@ export class Agent {
         provider: decision.provider,
         model: decision.model,
         usage: decision.usage,
+        aiError: decision.aiError || null,
       };
       return this._begin(chatId, decision.tool, raw, trigger, contextToken, meta);
     }
