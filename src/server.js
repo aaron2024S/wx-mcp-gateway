@@ -512,6 +512,13 @@ const server = http.createServer(async (req, res) => {
 
   // ---- 静态页面 ----
   if (!p.startsWith('/api/')) {
+    // 标签页图标必须免登录：登录页本身就是"没有会话"的状态，图标要是被
+    // 302 到 /login，浏览器拿到的是 HTML，标签栏照样空白。只白名单这一个
+    // 路径，别顺手把整个静态目录放开。
+    if (p === '/favicon.svg' || p === '/favicon.ico') {
+      serveStatic(res, '/favicon.svg');
+      return;
+    }
     if (p === '/login' || p === '/login.html') {
       if (currentSession(req)) { res.writeHead(302, { Location: '/' }).end(); return; }
       serveStatic(res, '/login.html');

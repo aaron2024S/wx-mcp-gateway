@@ -87,7 +87,7 @@ async function req(method, p, body, opts = {}) {
   let json = null;
   const text = await res.text();
   try { json = JSON.parse(text); } catch { /* html 或空 */ }
-  return { status: res.status, json, text, location: res.headers.get('location') };
+  return { status: res.status, json, text, location: res.headers.get('location'), type: res.headers.get('content-type') };
 }
 
 // ---- 等服务起来 -------------------------------------------------------
@@ -116,6 +116,14 @@ ok('打开首页被甩到 /login', home.status === 302 && home.location === '/lo
 const loginPage = await req('GET', '/login', undefined, { cookie: '' });
 ok('登录页能打开', loginPage.status === 200 && /设置访问密码|登录/.test(loginPage.text));
 ok('登录页不引用外部资源', !/https?:\/\//.test(loginPage.text.replace(/https?:\/\/www\.w3\.org[^"']*/g, '')));
+
+// 图标必须在"没有会话"时也拿得到：登录页是第一屏，图标被 302 到 /login
+// 的话浏览器收到的是 HTML，标签栏还是空白。
+const fav = await req('GET', '/favicon.svg', undefined, { cookie: '' });
+ok('未登录也能取到标签页图标', fav.status === 200 && /^image\/svg\+xml/.test(fav.type || ''), `${fav.status} ${fav.type}`);
+ok('图标是真的 svg 内容', fav.text.trimStart().startsWith('<svg'));
+const favIco = await req('GET', '/favicon.ico', undefined, { cookie: '' });
+ok('/favicon.ico 也回图标而不是 HTML', favIco.status === 200 && /^image\/svg\+xml/.test(favIco.type || ''), `${favIco.status} ${favIco.type}`);
 
 const s0 = await req('GET', '/api/auth/session', undefined, { cookie: '' });
 ok('session 说还没初始化', s0.json?.initialized === false, JSON.stringify(s0.json));

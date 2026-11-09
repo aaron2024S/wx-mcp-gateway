@@ -474,6 +474,21 @@ async function main() {
     llm.server.close();
   }
 
+  console.log('\n=== ④h 两个页面都要有标签页图标 ===');
+  {
+    // 浏览器标签栏没图标时是"未认领的页面"，看着像半成品；而且很容易只给
+    // index.html 加、忘了 login.html——登录页恰恰是用户看到的第一屏。
+    const read = (p) => fs.readFileSync(new URL(`../src/web/${p}`, import.meta.url), 'utf8');
+    const icon = read('favicon.svg');
+    ok('favicon.svg 存在且是 32 格矢量', /viewBox="0 0 32 32"/.test(icon));
+    ok('图标是品牌蓝底 + 三条白线（与侧边栏同一个标）',
+      /#5B8CFF/.test(icon) && /#2F6BEE/.test(icon) && (icon.match(/stroke="#fff"/g) || []).length === 1);
+    for (const page of ['index.html', 'login.html']) {
+      ok(`${page} 引用了图标`, /rel="icon"[^>]*favicon\.svg/.test(read(page)), page);
+      ok(`${page} 的品牌标识仍是原来那个`, /M2\.5 4\.2h11/.test(read(page)), page);
+    }
+  }
+
   console.log('\n=== ⑤ 重投去重 ===');
   outbox.length = 0;
   calls.length = 0;
