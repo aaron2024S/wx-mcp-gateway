@@ -132,7 +132,8 @@
   .badge.read{background:var(--green-soft); color:var(--green)}
   .badge.write{background:var(--amber-soft); color:var(--amber)}
   .badge.high{background:var(--red-soft); color:var(--red)}
-  .badge.ghost{background:transparent; border-color:var(--border); color:var(--text-faint)}
+  .badge.ghost{background:transparent; border-color:var(--border); color:var(--text-dim)}
+  .badge.ai{background:var(--accent-soft); color:var(--accent)}
   .btn{
     font:inherit; font-size:13px; padding:7px 14px; border-radius:8px;
     border:1px solid var(--border); background:var(--surface-2); color:var(--text);
@@ -150,7 +151,8 @@
     padding:0 10px 9px; border-bottom:1px solid var(--border);
   }
   td{padding:10px; border-bottom:1px solid var(--border-soft); color:var(--text-dim)}
-  td:nth-child(6){white-space:nowrap}
+  td.nowrap{white-space:nowrap}
+  .faint{color:var(--text-faint)}
   tr:last-child td{border-bottom:none}
   td.strong{color:var(--text)}
   .tbl-wrap{background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:14px 6px 6px}

@@ -25,6 +25,7 @@ import { SessionStore } from '../src/session.js';
 import { Agent } from '../src/agent.js';
 import { Log } from '../src/log.js';
 import { renderResult } from '../src/exec.js';
+import { formatCall } from '../src/calllog.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let pass = 0;
@@ -192,6 +193,37 @@ function mockIlink() {
   })));
 }
 
+// ---- 假 AI 端点（OpenAI 兼容）----------------------------------------
+// 只为了让「via=llm + token 用量」这条路径能被真正跑一遍：
+// 不接真 API，也就不会因为没 key 而让这一段永远没人测。
+
+function mockLlm() {
+  const seen = [];
+  const server = http.createServer((req, res) => {
+    let buf = '';
+    req.on('data', (c) => { buf += c; });
+    req.on('end', () => {
+      seen.push({ path: req.url, body: JSON.parse(buf || '{}') });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        choices: [{
+          message: {
+            role: 'assistant',
+            content: null,
+            tool_calls: [{ id: 'c1', type: 'function', function: { name: 'list_messages', arguments: '{}' } }],
+          },
+        }],
+        usage: { prompt_tokens: 812, completion_tokens: 43, total_tokens: 855 },
+      }));
+    });
+  });
+  return new Promise((r) => server.listen(0, '127.0.0.1', () => r({
+    server,
+    seen,
+    url: `http://127.0.0.1:${server.address().port}/v1`,
+  })));
+}
+
 // ---- 主流程 -----------------------------------------------------------
 
 async function main() {
@@ -223,9 +255,13 @@ async function main() {
 
   const wechat = new IlinkClient({ dataDir, baseUrl: ilBase, log });
   const outbox = [];
+  const logged = [];   // agent 落盘前的原始记录，用来验「谁认的 + 花了多少 token」
   const agent = new Agent({
     registry, config, sessions, log,
-    hooks: { send: async (chatId, text, ctx) => { outbox.push(text); await wechat.send(chatId, text, ctx); } },
+    hooks: {
+      send: async (chatId, text, ctx) => { outbox.push(text); await wechat.send(chatId, text, ctx); },
+      logCall: (rec) => logged.push(rec),
+    },
   });
   wechat.on('message', (m) => agent.handle({ chatId: m.chatId, text: m.text, contextToken: m.contextToken, trigger: 'wechat' }));
 
@@ -399,6 +435,43 @@ async function main() {
     );
     ok('列表行带出未读数', out.text.includes('未读 5'), out.text.split('\n')[1]);
     ok('未读为 0 的账号不标未读', !out.text.includes('未读 0'), out.text.split('\n')[2]);
+  }
+
+  console.log('\n=== ④g 日志要看得出「是不是 AI 认的」和花了多少 token ===');
+  {
+    // 用户要的是这两列的**准确性**：本地命中要标本地且不编造 token，
+    // AI 命中要带服务商/模型/用量。所以这里让整条链路真跑一遍。
+    const localRec = logged.find((x) => x.via === 'local');
+    const localRow = formatCall(localRec || {});
+    ok('本地命中记为 via=local', localRow.via === 'local', String(localRow.via));
+    ok('本地命中不带 token（是空，不是 0）', localRow.tok === null && localRow.tokIn === null, JSON.stringify(localRow));
+
+    const llm = await mockLlm();
+    config.llm = {
+      enabled: true, default: 'mock', timeout: 5, max_tokens: 128,
+      providers: { mock: { type: 'openai', base_url: llm.url, model: 'deepseek-flash', api_key: 'k' } },
+    };
+    config.routing.llm_when = 'miss';
+
+    outbox.length = 0;
+    il.push({ from_user_id: 'wxid_me', context_token: 'CTX-L', msg_id: 'mL', item_list: [{ type: 1, text_item: { text: '那个东西现在怎么样了' } }] });
+    for (let i = 0; i < 40 && !outbox.length; i++) await sleep(100);
+
+    ok('本地没听懂时确实问了 AI', llm.seen.length === 1, `${llm.seen.length} 次`);
+    const rec = logged.at(-1);
+    ok('AI 选中的调用记为 via=llm', rec?.via === 'llm', String(rec?.via));
+    ok('带上服务商与模型', rec?.provider === 'mock' && rec?.model === 'deepseek-flash', `${rec?.provider}/${rec?.model}`);
+    ok('带上 token 用量（input/output/total 已统一）',
+      rec?.usage?.input === 812 && rec?.usage?.output === 43 && rec?.usage?.total === 855,
+      JSON.stringify(rec?.usage));
+
+    const row = formatCall(rec || {});
+    ok('落盘记录带 token 三件套', row.tokIn === 812 && row.tokOut === 43 && row.tok === 855, JSON.stringify(row));
+
+    // 还原，别把 AI 开着影响后面几条
+    config.llm = { enabled: false, providers: {} };
+    config.routing.llm_when = 'never';
+    llm.server.close();
   }
 
   console.log('\n=== ⑤ 重投去重 ===');

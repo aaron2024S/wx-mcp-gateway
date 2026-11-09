@@ -20,6 +20,7 @@ import { Agent } from './agent.js';
 import { IlinkClient, DEFAULT_BASE } from './ilink.js';
 import { checkRisk, runTool, renderResult, riskLabel } from './exec.js';
 import { routeWithLLM, listModels } from './llm.js';
+import { formatCall } from './calllog.js';
 import {
   Auth, AuthError, COOKIE_NAME, MIN_PASSWORD,
   MAX_FAILURES, TTL_KEEP_MS, lockedHint,
@@ -121,23 +122,6 @@ wechat.on('message', async (m) => {
     await wechat.send(m.chatId, `这条没处理好：${errText(e)}`, m.contextToken).catch(() => {});
   }
 });
-
-function formatCall(rec) {
-  return {
-    t: new Date(rec.at || Date.now()).toISOString(),
-    trigger: rec.trigger || 'wechat',
-    app: rec.tool?.appLabel || rec.app || '',
-    appId: rec.tool?.appId || '',
-    tool: rec.tool?.name || rec.tool || '',
-    key: rec.tool?.key || '',
-    args: rec.args || {},
-    risk: rec.tool?.risk || null,
-    ok: rec.ok !== false,
-    ms: rec.ms || 0,
-    err: rec.err || null,
-    via: rec.via || null,
-  };
-}
 
 // ---- 后台任务 ---------------------------------------------------------
 

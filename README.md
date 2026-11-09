@@ -337,6 +337,8 @@ Node ≥ 20。
 
 `llm_when` 四档控制什么时候调它：`never` / `miss`（默认，本地没命中才问）/ `ambiguous` / `always`。本地能确定时**一次外部请求都不发**。
 
+哪次花了钱，控制台看得见。调用日志的「识别」列区分这次是 AI 认的还是本地命中，「Token」列是这次 AI 路由的用量（把鼠标停上去能看到输入/输出拆分和服务商；本地命中显示「—」，服务商没返回用量时显示「未上报」——后者说明那个兼容端点不带 `usage` 字段，不是没花钱）。
+
 支持任何兼容 `/chat/completions` 的服务（DeepSeek、通义、Kimi、智谱、硅基流动、OpenRouter、Groq、xAI、Ollama、vLLM、LM Studio……名单还在变，所以**代码里不写死厂商**），Claude 单走 `/v1/messages`。**设置页点「添加服务商」，填厂商文档里的接口地址、模型名和 key 就能用**——下拉里的预设只是替你把这几个字段填好，没列进去的选「自定义」一样加。
 
 出厂 `providers` 是空的：默认不预设任何厂商，也不带任何 key。想直接用某家，就加一条：
@@ -403,9 +405,9 @@ Node ≥ 20。
 ## 开发与测试
 
 ```bash
-npm test           # 端到端：假 iLink 网关 + 假 MCP，62 项断言
+npm test           # 端到端：假 iLink 网关 + 假 MCP + 假 AI 端点，69 项断言
 npm run test:auth  # 登录：起真服务走完设密码→登录→改密→锁定，49 项断言
-npm run test:llm   # AI 路由层：假 OpenAI/Anthropic 端点 + 模型清单 + 四档 llm_when，30 项断言
+npm run test:llm   # AI 路由层：假 OpenAI/Anthropic 端点 + 模型清单 + 四档 llm_when + 用量归一化，35 项断言
 npm run test:store # 配置合并：三层覆盖顺序 + 凭据不外泄，33 项断言
 npm run demo       # 拉起真的 MailNest 跑一遍中文匹配
 ```
@@ -436,6 +438,7 @@ src/
   exec.js       执行层：风险闸门、参数收集、结果渲染成人话
   session.js    会话状态：确认、候选、补参、序号引用
   appstore.js   配置合并：手写配置 / 界面改动 / 密钥 三层分离
+  calllog.js    调用日志字段：识别方式（本地/AI）+ token 用量
   llm.js        多 provider AI 路由
   web/          单页控制台 + 登录页，零构建
 vendor/

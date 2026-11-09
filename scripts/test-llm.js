@@ -4,7 +4,7 @@
 
 import http from 'node:http';
 import { Registry } from '../src/registry.js';
-import { routeWithLLM, listModels, LlmError } from '../src/llm.js';
+import { routeWithLLM, listModels, normalizeUsage, LlmError } from '../src/llm.js';
 import { route } from '../src/router.js';
 
 const PORT = 3399;
@@ -144,7 +144,9 @@ async function main() {
     ok('解析出 tool_calls 里的工具名', r.tool === 'fake.send', String(r.tool));
     ok('解析出 arguments 对象', r.args?.to === 'a@b.com', JSON.stringify(r.args));
     ok('带回 provider / model', r.provider === 'p' && r.model === 'mock-1');
-    ok('带回 token 用量', r.usage?.total_tokens === 42, JSON.stringify(r.usage));
+    ok('带回 token 用量（统一成 input/output/total）',
+      r.usage?.input === 30 && r.usage?.output === 12 && r.usage?.total === 42,
+      JSON.stringify(r.usage));
     const req = seen.at(-1);
     ok('请求发到了 /chat/completions', req.url === '/v1/chat/completions', req.url);
     ok('带了 Bearer 鉴权', String(req.headers.authorization || '') === 'Bearer sk-test');
@@ -158,6 +160,9 @@ async function main() {
     const r = await routeWithLLM({ text: '删掉那条记录', tools: reg.llmTools(), config: cfg });
     ok('解析出 tool_use 块', r.tool === 'fake.delete', String(r.tool));
     ok('解析出 input 对象', r.args?.to === 'a@b.com', JSON.stringify(r.args));
+    ok('Anthropic 的 input/output 也统一成同一形状',
+      r.usage?.input === 20 && r.usage?.output === 8 && r.usage?.total === 28,
+      JSON.stringify(r.usage));
     const req = seen.at(-1);
     ok('请求发到了 /v1/messages', req.url === '/v1/messages', req.url);
     ok('带了 x-api-key 头', String(req.headers['x-api-key'] || '') === 'ak-test');
@@ -236,6 +241,17 @@ async function main() {
     before = seen.length;
     const d2 = await route('随便说一句', { registry: fake(false, false), config: cfgMode('never') });
     ok('never：不自信时也只回菜单，不碰 AI', seen.length === before && d2.kind === 'menu', `${d2.kind} / ${seen.length - before} 次`);
+  }
+
+  console.log('\n=== token 用量归一化（各家字段名不一样）===');
+  {
+    const u1 = normalizeUsage({ prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 });
+    ok('OpenAI 系 prompt/completion → input/output',
+      u1?.input === 1 && u1?.output === 2 && u1?.total === 3, JSON.stringify(u1));
+    ok('没给 total 时自己加', normalizeUsage({ input_tokens: 5, output_tokens: 6 })?.total === 11);
+    ok('只有 total 也能用', normalizeUsage({ total_tokens: 7 })?.total === 7);
+    // null 和 0 必须能分开：前者界面显示「未上报」，后者是「真的没花」
+    ok('没有 usage 返回 null 而不是 0', normalizeUsage(null) === null && normalizeUsage({}) === null);
   }
 
   console.log('\n=== 拉取模型清单（模型名不该写死在代码里）===');

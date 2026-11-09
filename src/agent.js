@@ -13,6 +13,20 @@ import { isYes, isNo, parseOrdinal } from './session.js';
 const MAX_INPUT = 2000;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// 识别方式与 AI 用量要跟着「这个工具是怎么被选中的」一路带到落盘那一行。
+// 中途会经过「补参数」「二次确认」两个异步跳，meta 必须跟着 pending 一起存，
+// 否则用户回一句「确认」之后，日志里就变成「不知道是谁选的」。
+function metaFields(meta) {
+  const m = meta || {};
+  return {
+    via: m.via || null,
+    score: m.score ?? null,
+    provider: m.provider || null,
+    model: m.model || null,
+    usage: m.usage || null,
+  };
+}
+
 const HELP_TAIL = [
   '其他指令：',
   '/list 看能做哪些事',
@@ -78,7 +92,7 @@ export class Agent {
       if (pending.type === 'confirm') {
         if (isYes(raw)) {
           this.sessions.clearPending(chatId);
-          return this._run(chatId, pending.toolKey, pending.args || {}, trigger, contextToken);
+          return this._run(chatId, pending.toolKey, pending.args || {}, trigger, contextToken, pending.meta || {});
         }
         if (isNo(raw)) {
           this.sessions.clearPending(chatId);
@@ -117,7 +131,15 @@ export class Agent {
 
     if (decision.kind === 'say') return say(decision.text);
     if (decision.kind === 'call') {
-      return this._begin(chatId, decision.tool, raw, trigger, contextToken, { via: decision.via, score: decision.score });
+      // 只带「这次是谁认的 + 花了多少」，不要把整个 decision（含工具 schema）塞进会话里
+      const meta = {
+        via: decision.via,
+        score: decision.score,
+        provider: decision.provider,
+        model: decision.model,
+        usage: decision.usage,
+      };
+      return this._begin(chatId, decision.tool, raw, trigger, contextToken, meta);
     }
 
     // menu
@@ -179,7 +201,7 @@ export class Agent {
     const merged = parseInlineArgs(tool, text || '');
     const miss = missingArgs(tool, merged);
     if (miss.length) {
-      this.sessions.setPending(chatId, { type: 'args', toolKey: tool.key, args: merged, missing: miss });
+      this.sessions.setPending(chatId, { type: 'args', toolKey: tool.key, args: merged, missing: miss, meta });
       await this.hooks.send(chatId, `要执行「${tool.title || tool.name}」，还差一个${describeParam(tool, miss[0])}：`, contextToken);
       return { handled: true };
     }
@@ -194,12 +216,12 @@ export class Agent {
     const args = { ...pending.args, [name]: coerceArg(tool, name, raw) };
     const miss = missingArgs(tool, args);
     if (miss.length) {
-      this.sessions.setPending(chatId, { type: 'args', toolKey: tool.key, args, missing: miss });
+      this.sessions.setPending(chatId, { type: 'args', toolKey: tool.key, args, missing: miss, meta: pending.meta });
       await this.hooks.send(chatId, `还差一个${describeParam(tool, miss[0])}：`, contextToken);
       return { handled: true };
     }
     this.sessions.clearPending(chatId);
-    return this._guard(chatId, tool, args, trigger, contextToken, {});
+    return this._guard(chatId, tool, args, trigger, contextToken, pending.meta || {});
   }
 
   // 风险闸门
@@ -209,12 +231,12 @@ export class Agent {
 
     if (v.verdict === 'denied') {
       await this.hooks.send(chatId, v.reason, contextToken);
-      this._logCall({ trigger, tool, args, ok: false, ms: 0, err: '被网关拦截' });
+      this._logCall({ trigger, tool, args, ok: false, ms: 0, err: '被网关拦截', ...metaFields(meta) });
       return { handled: true };
     }
     if (v.verdict === 'confirm') {
       const ttl = this.config.gateway.confirm_ttl || 60;
-      this.sessions.setPending(chatId, { type: 'confirm', toolKey: tool.key, args });
+      this.sessions.setPending(chatId, { type: 'confirm', toolKey: tool.key, args, meta });
       const preview = Object.keys(args).length
         ? `参数：${Object.entries(args).map(([k, x]) => `${k}=${String(x).slice(0, 40)}`).join('，')}\n`
         : '';
@@ -267,8 +289,7 @@ export class Agent {
       ok: !res.isError,
       ms: res.ms || Date.now() - started,
       err: res.isError ? String(res.text || '').slice(0, 120) : null,
-      via: meta.via || null,
-      score: meta.score ?? null,
+      ...metaFields(meta),
     });
     return { handled: true };
   }

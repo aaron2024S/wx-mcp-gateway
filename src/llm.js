@@ -192,6 +192,19 @@ async function callAnthropic(text, tools, p, timeoutMs, maxTokens) {
 
 const ADAPTERS = { openai: callOpenAI, anthropic: callAnthropic };
 
+// 各家报 token 用量的字段名不一样，统一成 {input, output, total}。
+// 为什么要在这一层统一：控制台要显示「这次 AI 花了多少」，如果上层拿到的
+// 是 prompt_tokens / input_tokens 两种形状，那判断逻辑就会散在 UI 里。
+export function normalizeUsage(u) {
+  if (!u || typeof u !== 'object') return null;
+  const n = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+  const input = n(u.prompt_tokens) ?? n(u.input_tokens);
+  const output = n(u.completion_tokens) ?? n(u.output_tokens);
+  const total = n(u.total_tokens) ?? (input !== null && output !== null ? input + output : null);
+  if (input === null && output === null && total === null) return null;
+  return { input, output, total };
+}
+
 // 候选顺序：指定 → 默认 → 配置里的 fallback 链
 function candidates(cfg, preferred) {
   const llm = cfg.llm || {};
@@ -234,7 +247,7 @@ export async function routeWithLLM({ text, tools, config, providerId }) {
         via: 'llm',
         provider: p.id,
         model: p.model,
-        usage: r.usage,
+        usage: normalizeUsage(r.usage),
         ms: Date.now() - started,
       };
     } catch (e) {

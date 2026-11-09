@@ -136,19 +136,58 @@ function appCard(a) {
   </div>`;
 }
 
+// 识别方式：AI 认出来的才显示 AI，本地命中显示「本地」。
+// 用户真正想区分的就是这两种——前者花钱且有延迟，后者零成本。
+function viaCell(r) {
+  if (r.via === 'llm') {
+    const tip = [r.provider, r.model].filter(Boolean).join(' / ') || 'AI 识别';
+    return `<span class="badge ai" title="由 AI 识别：${esc(tip)}">AI</span>`;
+  }
+  if (r.via === 'local') return '<span class="badge ghost" title="本地索引命中，没调用 AI，不产生费用">本地</span>';
+  if (r.via === 'ref') return '<span class="badge ghost" title="引用上一轮列表里的序号">列表</span>';
+  if (r.trigger === 'console') return '<span class="badge ghost">手动</span>';
+  return '<span class="faint">—</span>';
+}
+
+function fmtTok(n) {
+  if (n >= 10000) return Math.round(n / 1000) + 'k';
+  if (n >= 1000) return (n / 1000).toFixed(1) + 'k';
+  return String(n);
+}
+
+// token 只对 AI 调用有意义：本地命中是 0 成本，显示成「0」会被误读成「没花」。
+function tokCell(r) {
+  const total = typeof r.tok === 'number'
+    ? r.tok
+    : (typeof r.tokIn === 'number' || typeof r.tokOut === 'number' ? (r.tokIn || 0) + (r.tokOut || 0) : 0);
+  if (!total) {
+    return r.via === 'llm'
+      ? '<span class="faint" title="服务商没有返回用量（部分兼容端点不带 usage 字段）">未上报</span>'
+      : '<span class="faint">—</span>';
+  }
+  const parts = [];
+  if (typeof r.tokIn === 'number') parts.push(`输入 ${r.tokIn}`);
+  if (typeof r.tokOut === 'number') parts.push(`输出 ${r.tokOut}`);
+  if (r.model) parts.push(r.model);
+  return `<span title="${esc(parts.join(' · '))}">${fmtTok(total)}</span>`;
+}
+
 function logTable(rows, compact) {
   if (!rows.length) return '<div class="empty">还没有调用记录</div>';
-  const head = `<thead><tr><th style="width:78px">时间</th><th style="width:66px">触发</th>
-    <th style="width:70px">应用</th><th>工具</th><th style="width:88px">结果</th>
+  const head = `<thead><tr><th style="width:76px">时间</th><th style="width:58px">触发</th>
+    <th style="width:66px">应用</th><th>工具</th><th style="width:56px">识别</th>
+    <th style="width:72px">Token</th><th style="width:60px">结果</th>
     <th style="width:64px">耗时</th></tr></thead>`;
   const body = rows.map((r) => {
     const t = String(r.t || '').slice(11, 19);
     const ok = r.ok ? '<span class="ok">成功</span>'
       : `<span class="err" title="${esc(r.err || '')}">失败</span>`;
-    return `<tr><td>${t}</td><td>${esc(TRIGGER[r.trigger] || r.trigger || '')}</td>
+    return `<tr><td class="nowrap">${t}</td><td>${esc(TRIGGER[r.trigger] || r.trigger || '')}</td>
       <td class="strong">${esc(r.app || '')}</td>
       <td><span class="mono">${esc(r.tool || '')}</span></td>
-      <td>${ok}</td><td>${r.ms || 0} ms</td></tr>`;
+      <td class="nowrap">${viaCell(r)}</td>
+      <td class="nowrap">${tokCell(r)}</td>
+      <td class="nowrap">${ok}</td><td class="nowrap">${r.ms || 0} ms</td></tr>`;
   }).join('');
   return `<table>${compact ? '' : head}<tbody>${body}</tbody></table>`;
 }
