@@ -59,7 +59,7 @@
 ```yaml
 services:
   wx-mcp-gateway:
-    image: aaron2024s/wx-mcp-gateway:0.3.4
+    image: aaron2024s/wx-mcp-gateway:0.3.5
     container_name: wx-mcp-gateway
     restart: unless-stopped
 
