@@ -470,6 +470,22 @@ async function main() {
     );
     ok('只有一个来源时不啰嗦「合并」', !/合并/.test(single.text), single.text.split('\n').slice(-1)[0]);
 
+    // 时间：应用返回的是 ISO + UTC（2026-11-09T06:05:00Z），直接抛给用户既没法读，
+    // 又和手机上的钟差 8 小时。纯文本结果（搜索、未读数）里的时间戳同样要处理。
+    const today = new Date().toISOString();
+    const timed = renderResult(
+      { name: 'mail.list_messages', title: '列出邮件' },
+      { isError: false, text: '', data: { messages: [{ uid: 7, subject: '有时间的邮件', date: today }] } },
+    );
+    ok('列表里的 ISO 时间换成本地短格式', /今天 \d{2}:\d{2}/.test(timed.text) && !/T\d{2}:\d{2}/.test(timed.text), timed.text.split('\n')[1]);
+
+    const searched = renderResult(
+      { name: 'mail.search_messages', title: '搜索邮件' },
+      { isError: false, text: `1. [a@b.com / INBOX] 主题 — 某人 · ${today} · uid=42 · 未读`, data: null },
+    );
+    ok('纯文本里的 uid 不再透给用户', !/uid=/.test(searched.text), searched.text);
+    ok('纯文本里的 ISO 时间也本地化', !/T\d{2}:\d{2}/.test(searched.text), searched.text);
+
     // 应用作者习惯把最要紧的一句放描述末尾（「指名邮箱就必须传 account」正是这种）。
     // 以前一律截到 300 字，正好把末尾的硬约束剪掉，模型只看到中性说明就开始漏参数。
     const tail = '用户指名了某个邮箱时必须传 account，不要查全部账号。';

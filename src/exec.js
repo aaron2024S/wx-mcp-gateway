@@ -173,6 +173,33 @@ function brief(v, max = 48) {
   return '';
 }
 
+// 邮件时间在返回里常是 ISO（2026-11-09T06:05:00Z）。直接抛给用户，微信里是一串没人会读的
+// 字符，而且它还是 UTC——和用户手机上的钟差 8 小时。这里统一转本地时间：当天写「今天 14:05」，
+// 同年省略年份。认不出来的（「昨天」「3 天前」这种应用已经写好的）原样放过。
+function humanTime(v) {
+  if (typeof v !== 'string' || !/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/.test(v)) return v;
+  const d = new Date(v);
+  if (Number.isNaN(d.getTime())) return v;
+  const p = (n) => String(n).padStart(2, '0');
+  const now = new Date();
+  const hm = `${p(d.getHours())}:${p(d.getMinutes())}`;
+  if (d.toDateString() === now.toDateString()) return `今天 ${hm}`;
+  const md = `${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  return d.getFullYear() === now.getFullYear() ? `${md} ${hm}` : `${d.getFullYear()}-${md} ${hm}`;
+}
+
+// 应用返回的纯文本里常夹着写给模型看的定位信息，以及未格式化的 UTC 时间戳。
+//   · 「· uid=101」——用户看到只会问「uid 是什么」
+//   · 「2026-11-09T06:05:00Z」——一串没人会读的字符，而且还是 UTC，和手机上的钟差 8 小时
+// 只清这两种形状（都极固定，不会误伤邮件正文）。不带 Z 的时间不动，当作已经是本地时间。
+function humanize(raw) {
+  return String(raw || '')
+    .replace(/\s*[·|]\s*uid\s*=\s*\d+/gi, '')
+    .replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?Z/g, (m) => humanTime(m))
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 function itemLine(item, idx) {
   if (!isPlain(item)) return `${idx}. ${brief(item, 80)}`;
   let name = '';
@@ -188,7 +215,8 @@ function itemLine(item, idx) {
     if (k === 'size' || k === 'count' || k === 'unread') continue;
     const v = item[k];
     if (v === undefined || v === null || v === '') continue;
-    const s = brief(v, 24);
+    const isTimeKey = k === 'date' || k === 'time' || k === 'created_at' || k === 'updated_at';
+    const s = brief(isTimeKey ? humanTime(v) : v, 24);
     if (s && s !== name) subs.push(s);
     if (subs.length >= 2) break;
   }
@@ -270,8 +298,8 @@ export function renderResult(tool, res, { limit = 8 } = {}) {
     return { text: hint ? `「${tool.title || tool.name}」：${hint}` : `「${tool.title || tool.name}」没有数据。` };
   }
 
-  // 非列表：纯文本截断
-  const raw = String(res.text || '').trim();
+  // 非列表：纯文本截断（先把写给模型看的定位信息清掉，再判长度）
+  const raw = humanize(res.text);
   if (!raw) return { text: `「${tool.title || tool.name}」执行完成，没有返回内容。` };
   if (raw.length <= 900) return { text: raw };
   return { text: raw.slice(0, 900) + `\n…（共 ${raw.length} 字，已截断）` };
