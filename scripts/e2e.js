@@ -735,6 +735,19 @@ async function main() {
     fake.sessions.get('chain-3').lastUser = '这封写了什么';
     await fake._maybeOpenNewest('chain-3', rendered, 'wechat', 'CTX', { via: 'ref' });
     ok('已经是在打开某一条时不再自动打开', picked === null, JSON.stringify(picked));
+
+    // 搜索首次要建索引，几秒钟里用户再发一句话，会话里的 lastUser 就被改成后一句了。
+    // 这一跳必须按**本轮自己的原话**判断，否则"问验证码"会被后一句"有哪些邮件"带偏。
+    picked = null;
+    fake.sessions.get('chain-4').lastUser = 'steam有哪些邮件';   // 后一句覆盖了最近一句
+    await fake._maybeOpenNewest('chain-4', rendered, 'wechat', 'CTX', { via: 'ai', asked: 'steam登录验证码是多少' });
+    ok('按本轮原话判断，不被会话里的最近一句带偏', picked?.ref?.value === 22, JSON.stringify(picked?.ref));
+
+    // 反过来也要成立：本轮原话是要清单，就不能因为别的原因擅自打开
+    picked = null;
+    fake.sessions.get('chain-5').lastUser = 'steam登录验证码是多少';
+    await fake._maybeOpenNewest('chain-5', rendered, 'wechat', 'CTX', { via: 'ai', asked: 'steam有哪些邮件' });
+    ok('本轮原话要清单时仍然不插手', picked === null, JSON.stringify(picked));
   }
 
   console.log('\n=== ④k 参数与正文：模型读到的要用上，机器信头别占屏 ===');

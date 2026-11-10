@@ -299,6 +299,10 @@ export class Agent {
 
   // 参数是否齐，齐了就走风险检查
   async _begin(chatId, tool, text, trigger, contextToken, meta = {}, aiArgs = {}) {
+    // 把「用户这一句原话」钉在 meta 上跟着这一轮走。会话里的 lastUser 是"最近一句"，
+    // 慢操作（首次搜索建索引要几秒）期间用户再发一句话，它就被覆盖了——执行完回头
+    // 判断"这句是不是在问内容"时，读到的会是别人的话。用本轮自己的原话才不会串。
+    meta = { ...meta, asked: String(text || '').slice(0, 60) };
     // 参数有两个来源：模型从这句话里读出来的（aiArgs），和用户按模板敲的（「关键词：旅游」）。
     // 早先只用了后者，于是「帮我找一封有关旅游的邮件」明明带着关键词，却被追问「关键词是什么：
     // 一句话里并没有『关键词：』这种模板——模型读对了也没用上。现在两个都收。
@@ -405,6 +409,10 @@ export class Agent {
         });
         return opened;
       }
+    } else if (/共 \d+ 条/.test(rendered.text || '')) {
+      // 清单出来了却没有可引用的条目：说明返回结构里认不出 id（uid/id/name…）。
+      // 这时用户回「1」也打不开，得先知道是这个原因，而不是"自动跳没生效"。
+      this.log?.warn?.('open', `列出了清单但没认出发起下一步的 id：${String(rendered.text).slice(0, 100).replace(/\n/g, ' ')}`);
     }
 
     // 「总结一下」：拿到正文后让人话摘要，替换掉那一大段原文。
@@ -466,8 +474,14 @@ export class Agent {
   // 缺的是「搜完接着打开」这一跳，以前要用户自己回一个「1」。
   async _maybeOpenNewest(chatId, rendered, trigger, contextToken, meta = {}) {
     const items = rendered?.items || [];
-    const asked = this.sessions.get(chatId)?.lastUser || '';
-    if (!Agent.shouldOpenNewest(asked, items, meta)) return null;
+    // 优先用这一轮自己的原话（见 _begin）；会话里的 lastUser 只作兜底。
+    const asked = String(meta.asked || this.sessions.get(chatId)?.lastUser || '');
+    if (!Agent.shouldOpenNewest(asked, items, meta)) {
+      // 留一条能被 docker logs 看见的判断依据：下次"问内容却只给清单"时，
+      // 不必再靠猜——直接看这句话被当成了什么。
+      this.log?.info?.('open', `没自动打开：${JSON.stringify(asked.slice(0, 30))} · 列表 ${items.length} 条 · via=${meta.via || '-'}${meta.digest ? ' · 摘要' : ''}`);
+      return null;
+    }
     const target = Agent.newestItem(items);
     if (!target) return null;
     const when = target.when ? `（${target.when}）` : '';
