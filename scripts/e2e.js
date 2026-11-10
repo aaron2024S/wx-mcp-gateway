@@ -323,6 +323,10 @@ async function main() {
   const config = {
     gateway: { default_app: null, confirm_risk: ['high'], confirm_ttl: 60, call_timeout: 15, async_after: 5 },
     routing: { local_threshold: 0.5, ask_threshold: 0.25, llm_when: 'never' },
+    // 这套用例逐条锁的是**单轮**编排的行为（本地命中/降级/自动打开/换词…）。
+    // 闭环是另一条路径，脚本是 test:loop，别在这里混着测——否则一个改判据就两套一起红，
+    // 分不清是"闭环退化了"还是"单轮本来就这样"。
+    agent: { mode: 'off' },
     llm: { enabled: false, providers: {} },
     apps: [{
       id: 'mail', label: '邮箱', aliases: ['邮件'],

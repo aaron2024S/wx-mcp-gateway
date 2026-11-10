@@ -8,7 +8,7 @@
 
 import { route, renderMenu } from './router.js';
 import { checkRisk, missingArgs, describeParam, coerceArg, parseInlineArgs, prepareArgs, mergeArgs, runTool, renderResult, riskLabel } from './exec.js';
-import { chatOnce } from './llm.js';
+import { chatOnce, agentLoop } from './llm.js';
 import { isYes, isNo, parseOrdinal } from './session.js';
 
 const MAX_INPUT = 2000;
@@ -300,8 +300,17 @@ export class Agent {
       }
     }
 
-    // ④ 识别（带上最近几轮，模型才知道「总结一下」指的是什么）
     const history = this._history(chatId);
+
+    // ④ 闭环：让模型自己决定查几步（看结果 → 再决定），而不是一次猜完就交给规则。
+    //    失败/超时/无进展都返回 null，静默回落到下面的单轮路由——这条路径出问题
+    //    不该比现在更差，它只是"能多想几步"的那个版本。
+    if (this._loopEnabled()) {
+      const viaLoop = await this._agentTurn(chatId, raw, trigger, contextToken);
+      if (viaLoop) return viaLoop;
+    }
+
+    // ⑤ 单轮识别（保底：AI 挂了、闭环超时、或配置里关了闭环）
     const decision = await route(raw, { registry: this.registry, config: this.config, history });
 
     if (decision.kind === 'say') return say(decision.text);
@@ -331,6 +340,111 @@ export class Agent {
   }
 
   // ---- 内部 ---------------------------------------------------------
+
+  // 闭环开关：默认跟 AI 开关走。留 agent.mode='off' 能一键退回单轮，
+  // 排查"到底是模型的问题还是编排的问题"时很有用（对比跑一遍就清楚了）。
+  _loopEnabled() {
+    if (this.config.llm?.enabled !== true) return false;
+    if (this.config.routing?.llm_when === 'never') return false;
+    const mode = String(this.config.agent?.mode || 'auto').toLowerCase();
+    return mode !== 'off' && mode !== 'false' && mode !== '0';
+  }
+
+  // 跑一轮闭环。返回 {handled:true} 表示这条消息已经处理完；返回 null 表示
+  // 这一路没成（AI 报错、超时、无进展、模型没给出回答），交回单轮路由保底。
+  async _agentTurn(chatId, raw, trigger, contextToken) {
+    const tools = this.registry.llmTools(null);
+    if (!tools.length) return null;
+    const maxRounds = Math.min(Math.max(Number(this.config.agent?.max_rounds) || 5, 1), 8);
+    const maxMs = Math.min(Math.max(Number(this.config.agent?.max_ms) || 45000, 8000), 120000);
+    const started = Date.now();
+
+    let r;
+    try {
+      r = await agentLoop({
+        text: raw,
+        tools,
+        config: this.config,
+        history: this._history(chatId),
+        maxRounds,
+        maxMs,
+        execute: (name, args) => this._loopExec(name, args),
+      });
+    } catch (e) {
+      // 闭环失败绝不能变成"这次没回话"：记一笔原因，让它走原来的单轮路径
+      this.log?.warn?.('agent', `闭环失败，回落单轮：${e?.message || e}`);
+      return null;
+    }
+
+    const steps = r.trace?.length || 0;
+    this.log?.info?.('agent', `闭环 ${r.rounds} 轮 / ${steps} 次工具 / ${Date.now() - started}ms / 停因=${r.stop}`);
+
+    // 碰到写操作：交回上层的确认流程（风险闸门、二次确认、审计都在那边）
+    if (r.stop === 'halt' && r.halted?.tool) {
+      return this._begin(chatId, r.halted.tool, raw, trigger, contextToken,
+        { via: 'llm', provider: r.provider, model: r.model, usage: r.usage }, r.halted.args || {});
+    }
+
+    const answer = String(r.text || '').trim();
+    if (!answer) {
+      // 没答出来（轮数用尽/超时/原地打转）：把已经查到的摆出来，别让人白等
+      const last = [...(r.trace || [])].reverse().find((t) => t.text);
+      if (last) {
+        const tail = last.text.length > 600 ? `${last.text.slice(0, 600)}…` : last.text;
+        await this.hooks.send(chatId, `这一步没查完（${r.stop}）。先把我找到的给你：\n${tail}`, contextToken);
+        this.sessions.pushTurn(chatId, {
+          user: this.sessions.get(chatId)?.lastUser || raw,
+          toolTitle: last.tool, args: last.args, result: tail, kind: 'text',
+        });
+        return { handled: true };
+      }
+      return null;
+    }
+
+    this._logCall({
+      trigger,
+      tool: { key: 'agent.loop', title: `AI 闭环（${steps} 步）`, appId: null },
+      args: Object.assign({}, ...(r.trace || []).map((t) => t.args || {})),
+      ok: true,
+      ms: Date.now() - started,
+      err: null,
+      ...metaFields({ via: 'llm', provider: r.provider, model: r.model, usage: r.usage }),
+    });
+
+    try {
+      const said = this.sessions.get(chatId).lastUser || '';
+      this.sessions.pushTurn(chatId, {
+        user: said, toolTitle: 'AI 查询', args: {}, result: answer, kind: 'text',
+      });
+    } catch { /* 记历史失败不影响这次结果 */ }
+
+    await this.hooks.send(chatId, answer, contextToken);
+    return { handled: true };
+  }
+
+  // 闭环里的单步执行：只读工具直接跑；写/高危一律 halt，交回确认流程。
+  async _loopExec(name, args) {
+    const tool = this.registry.find(name);
+    if (!tool) return { ok: false, text: `没有叫「${name}」的工具。只能用清单里有的工具，不要自己编名字。` };
+    if (tool.risk !== 'read') return { halt: { tool, args } };
+
+    const argv = prepareArgs(tool, args || {});
+    const miss = missingArgs(tool, argv);
+    if (miss.length) {
+      return { ok: false, text: `参数不完整：还差 ${miss.join('、')}。补上再调一次这个工具。` };
+    }
+    try {
+      const res = await runTool(this.registry, tool, argv, 25000);
+      const rendered = renderResult(tool, res, { limit: 10 });
+      let txt = String(rendered?.text || '');
+      // 结果压缩：一封长正文 8000 字，五轮下来会把上下文顶爆。摘要层只留前 2000 字，
+      // 够模型判断"这封是不是我要的"，不够的话它还能再调一次读更多。
+      if (txt.length > 2000) txt = `${txt.slice(0, 2000)}\n[结果已截断]`;
+      return { ok: !res.isError, text: txt, sig: `${name}|${JSON.stringify(argv)}` };
+    } catch (e) {
+      return { ok: false, text: `调用失败：${e?.message || e}`, sig: `${name}|${JSON.stringify(argv)}` };
+    }
+  }
 
   // 举例必须用真实工具，不能写死「查一下未读」——出厂不带任何应用，
   // 接进来的也可能是路由器、下载器，写死邮箱只会让人以为功能不存在。

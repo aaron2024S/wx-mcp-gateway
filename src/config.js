@@ -16,6 +16,13 @@ const DEFAULTS = {
     ask_threshold: 0.25,      // 低于这个分数当作"没听懂"
     llm_when: 'miss',         // miss | ambiguous | always | never
   },
+  // Agent 闭环：让模型看结果再决定下一步。关掉它就是原来的单轮路由，
+  // 两条路都留着——排查问题时能直接对比同一句话在两种编排下的差别。
+  agent: {
+    mode: 'auto',        // auto（跟 AI 开关走） | off
+    max_rounds: 5,       // 最多几轮工具调用
+    max_ms: 45000,       // 整轮时间预算（毫秒），超了就把已查到的先发出去
+  },
   llm: {
     enabled: false,
     default: '',              // 默认 provider 的 id

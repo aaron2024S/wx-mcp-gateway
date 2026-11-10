@@ -414,3 +414,181 @@ export function listProviders(config) {
     is_default: llm.default === id,
   }));
 }
+
+// ---------- 多轮工具循环（Agent 模式） ----------
+// 这里和上面的 routeWithLLM 是两种世界观：
+//   routeWithLLM：一句话 → 一次决策 → {tool, args}。执行、判据、措辞全在上层的硬编码规则里，
+//                 模型只是"把话翻译成参数"，它根本没机会看到结果、也就没法补救。
+//   agentLoop：  一句话 → 决策 → 执行 → 把结果压成摘要回灌 → 再决策 …… 直到模型说"够了"。
+// 2026-11-10 实测的差距：问「上次坐火车去哪」，单轮只能拿到 0 命中就认输；
+// 而多轮里有 3 次机会换词（火车→12306），换到就查到了。这不是模型聪明与否，
+// 是它能不能看见"上一次尝试的结果"。
+const AGENT_PROMPT = `你在微信里帮用户查东西。你有一个工具箱，可以连续调用多次来把问题查清楚。
+
+规则：
+1. 每一轮只调一个工具；需要更多信息就继续调，别急着下结论。
+2. 用户点名的范围必须原样带上：指明哪个账号/邮箱、哪个文件夹、要几条，就照填，不许省略、不许改默认值。
+3. 但「检索词」不是范围，是你的判断：用户说「火车」你就该想到搜 12306，「游戏订单」想到 Steam，
+   「航班」想到行程单/航司名。可以按常识替换、可以多试几个词，换词之后在回答里说明你换了什么。
+4. 搜不到不等于没有。先换词再搜，最多换两次；仍然没有，才说没查到，并说明试过哪些词。
+5. 答案必须能指出来源：几封、哪一封、什么时间。指不出来就不许答——不许把「看到了清单」说成「看过了正文」，
+   不许编造邮件里没有的金额、日期、单号。
+6. 只有一种情况可以停：你已经拿到了足以回答用户这句话的信息。
+7. 用中文回答，微信里看，3 到 6 句，不要 markdown、不要列表符号、不要分点编号。
+8. 工具返回里出现 hint / note 时，按其中的指引继续，不要忽略。
+
+现在开始。用户这句话可能是在接着上一轮说（「那个」「再详细点」），有历史就接着上一轮的对象做。`;
+
+// 两个协议的差别只在"怎么把上一轮的工具调用和结果塞回对话"，其余流程完全一样。
+// 把差别收进这两个小适配器，循环本身就不用分叉。
+const LOOP_ADAPTERS = {
+  openai: {
+    async step({ messages, wire, p, timeoutMs, maxTokens }) {
+      const headers = { ...p.headers };
+      if (p.api_key) headers.Authorization = `Bearer ${p.api_key}`;
+      const json = await post(`${p.base_url}/chat/completions`, headers, {
+        model: p.model,
+        messages,
+        tools: wire.map((t) => ({
+          type: 'function',
+          function: { name: t.name, description: t.description, parameters: t.inputSchema },
+        })),
+        tool_choice: 'auto',
+        temperature: 0,
+        max_tokens: maxTokens,
+      }, timeoutMs);
+      const msg = json?.choices?.[0]?.message || {};
+      const call = msg.tool_calls?.[0] || (msg.function_call ? { function: msg.function_call } : null);
+      return {
+        tool: call?.function?.name || null,
+        args: call ? pickFinish(call.function) : {},
+        text: msg.content || '',
+        id: call?.id || `call_${Date.now()}`,
+        raw: msg.content || '',
+        usage: json?.usage || null,
+      };
+    },
+    pushCall(messages, s) {
+      messages.push({
+        role: 'assistant',
+        content: s.raw || null,
+        tool_calls: [{ id: s.id, type: 'function', function: { name: s.wireName, arguments: JSON.stringify(s.args || {}) } }],
+      });
+    },
+    pushResult(messages, s, content) {
+      messages.push({ role: 'tool', tool_call_id: s.id, content });
+    },
+  },
+  anthropic: {
+    async step({ messages, wire, p, timeoutMs, maxTokens }) {
+      const headers = { 'x-api-key': p.api_key, 'anthropic-version': '2023-06-01', ...p.headers };
+      const sys = messages.find((m) => m.role === 'system')?.content || '';
+      const rest = messages.filter((m) => m.role !== 'system');
+      const json = await post(`${p.base_url}/v1/messages`, headers, {
+        model: p.model,
+        max_tokens: maxTokens,
+        ...(sys ? { system: sys } : {}),
+        messages: rest,
+        tools: wire.map((t) => ({ name: t.name, description: t.description, input_schema: t.inputSchema })),
+        temperature: 0,
+      }, timeoutMs);
+      const blocks = Array.isArray(json?.content) ? json.content : [];
+      const use = blocks.find((b) => b?.type === 'tool_use');
+      return {
+        tool: use?.name || null,
+        args: use?.input || {},
+        text: blocks.filter((b) => b?.type === 'text').map((b) => b.text).join('\n'),
+        id: use?.id || null,
+        raw: blocks,
+        usage: json?.usage || null,
+      };
+    },
+    pushCall(messages, s) {
+      messages.push({ role: 'assistant', content: s.raw });
+    },
+    pushResult(messages, s, content) {
+      messages.push({ role: 'user', content: [{ type: 'tool_result', tool_use_id: s.id, content }] });
+    },
+  },
+};
+
+/**
+ * 多轮工具循环。
+ * @param {object} o
+ * @param {string} o.text      用户这句话
+ * @param {Array}  o.tools     工具清单（registry.llmTools 的产物）
+ * @param {object} o.config    完整配置
+ * @param {Array}  o.history   最近几轮对话
+ * @param {(name:string,args:object)=>Promise<{ok:boolean,text:string,halt?:object,sig?:string}>} o.execute
+ * @param {number} o.maxRounds 最多几轮（默认 5）
+ * @param {number} o.maxMs     总时间预算
+ */
+export async function agentLoop({ text, tools, config, history = [], execute, maxRounds = 5, maxMs = 50000, providerId = null }) {
+  const list = candidates(config, providerId);
+  if (!list.length) throw new LlmError('config', '没有可用的 AI 服务商');
+  if (!tools?.length) throw new LlmError('config', '当前没有可用的工具');
+  const p = list[0];
+  const timeoutMs = Math.max(5000, (config.llm?.timeout || 15) * 1000);
+  const started = Date.now();
+  const adapter = LOOP_ADAPTERS[p.type] || LOOP_ADAPTERS.openai;
+  const { wire, back } = prepareTools(tools);
+  const wireOf = new Map(wire.map((w) => [back.get(w.name), w.name]));
+
+  const messages = [{ role: 'system', content: AGENT_PROMPT }];
+  for (const m of historyMessages(history)) messages.push(m);
+  messages.push({ role: 'user', content: text });
+
+  const trace = [];
+  const usage = { input: 0, output: 0, total: 0 };
+  const addUsage = (u) => {
+    const n = normalizeUsage(u);
+    if (!n) return;
+    usage.input += n.input || 0;
+    usage.output += n.output || 0;
+    usage.total += n.total || (n.input || 0) + (n.output || 0);
+  };
+
+  let lastSig = '';
+  let same = 0;
+  let rounds = 0;
+
+  for (let round = 1; round <= maxRounds; round++) {
+    if (Date.now() - started > maxMs) {
+      return { text: '', trace, usage, rounds, stop: 'timeout', provider: p.id, model: p.model };
+    }
+    const s = await adapter.step({ messages, wire, p, timeoutMs, maxTokens: Number(config.llm?.max_tokens) || 900 });
+    rounds = round;
+    addUsage(s.usage);
+
+    if (!s.tool) {
+      // 模型认为够了：这就是最终回答
+      return { text: String(s.text || '').trim(), trace, usage, rounds, stop: 'answered', provider: p.id, model: p.model };
+    }
+
+    const realName = unwireName(back, s.tool);
+    const r = await execute(realName, s.args || {});
+    if (r?.halt) {
+      // 写操作/高危操作不在循环里自动执行，交回上层的确认流程
+      return { text: '', trace, usage, rounds, stop: 'halt', halted: r.halt, provider: p.id, model: p.model };
+    }
+
+    // 无进展检测：同一工具同一参数连续两次，说明它在原地打转，再多轮也是白烧钱
+    const sig = r?.sig || `${realName}|${JSON.stringify(s.args || {})}`;
+    if (sig === lastSig) {
+      same += 1;
+      if (same >= 2) {
+        return { text: '', trace, usage, rounds, stop: 'no-progress', provider: p.id, model: p.model };
+      }
+    } else {
+      same = 0;
+      lastSig = sig;
+    }
+
+    trace.push({ tool: realName, args: s.args || {}, ok: r?.ok !== false, text: String(r?.text || '') });
+    s.wireName = wireOf.get(realName) || s.tool;
+    adapter.pushCall(messages, s);
+    adapter.pushResult(messages, s, String(r?.text || '（没有内容）'));
+  }
+
+  return { text: '', trace, usage, rounds, stop: 'max-rounds', provider: p.id, model: p.model };
+}
