@@ -254,7 +254,7 @@ function foldMachineLines(text) {
 //   · 「2026-11-09T06:05:00Z」——一串没人会读的字符，而且还是 UTC，和手机上的钟差 8 小时
 // 只清这两种形状（都极固定，不会误伤邮件正文）。不带 Z 的时间不动，当作已经是本地时间。
 function humanize(raw) {
-  return String(raw || '')
+  return shortenUrls(String(raw || '')
     // 单独的回车（老式 CRSF / 信头折行）在微信里会把同一行反复覆盖，看起来像乱码，
     // 统一当换行处理。先处理 \r\n，再把剩下的裸 \r 换掉。
     .replace(/\r\n/g, '\n')
@@ -262,7 +262,16 @@ function humanize(raw) {
     .replace(/\s*[·|]\s*uid\s*=\s*\d+/gi, '')
     .replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?Z/g, (m) => humanTime(m))
     .replace(/\n{3,}/g, '\n\n')
-    .trim();
+    .trim());
+}
+
+// 行内的超长链接是另一种机器串：Steam / 营销邮件的追踪链接动辄八九百字，一行就把正文刷没了。
+// 更糟的是它会让上面那条折叠规则把整行（连同这行里的正常中文）一起当机器串折掉——
+// 2026-11-10 实测：「请先访问 https：//help.steampowered.com/…」被折成「…（省略 120 字）」，
+// 用户看到的安全提示只剩半句，后面「验证您的位置再继续」整段消失。
+// 只动 100 字以上的链接，收成前 60 字：域名和路径开头还在，看得出是哪个站。
+function shortenUrls(text) {
+  return text.replace(/https?[:：]\/\/[^\s，。；）)】」"]{100,}/gi, (u) => `${u.slice(0, 60)}…`);
 }
 
 function itemLine(item, idx) {

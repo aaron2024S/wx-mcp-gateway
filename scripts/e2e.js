@@ -810,6 +810,17 @@ async function main() {
     // 单独的回车符在微信里会把同一行反复覆盖，看起来像乱码
     const cr = renderResult({ title: '读取邮件正文' }, { text: '主题：A\r发件人：B\r\n正文：C' });
     ok('回车统一成换行', !cr.text.includes('\r') && cr.text.split('\n').length >= 3, JSON.stringify(cr.text));
+
+    // 长链接不能拖着整行中文一起被当机器串折叠。2026-11-10 用户贴的 Steam 登录码邮件里，
+    // 「请先访问 https：//help.steampowered.com/…」整行被折成「…（省略 120 字）」，
+    // 后半句「验证您的位置再继续」整段消失，看着像正文被吃了。
+    const withLink = renderResult({ title: '读取邮件正文' }, {
+      text: `请先访问 https：//help.steampowered.com/zh-cn/wizard/HelpUnauthorizedLogin?snr=${'a'.repeat(150)}`
+        + ' 验证您的位置再继续。',
+    });
+    ok('长链接收短后不再连带整行折叠',
+      !/省略 \d+ 字/.test(withLink.text) && /验证您的位置再继续/.test(withLink.text)
+        && /help\.steampowered\.com/.test(withLink.text), withLink.text);
   }
 
   console.log('\n=== ④m 连续对话：上一轮的结果要接得住 ===');
