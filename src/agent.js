@@ -99,10 +99,10 @@ export class Agent {
   }
 
   // 问内容、但这一轮只拿到清单 ⇒ 值得再走一步去打开最新那条。
-  // 三种情况不插手：本来就走摘要（摘要流程自己会读正文）、已经是「回序号」那一跳、列表为空。
+  // 四种情况不插手：本来就走摘要、已经是在「回序号」那一跳、已经是自动打开那一跳、列表为空。
   static shouldOpenNewest(text, items, meta = {}) {
     if (!items?.length) return false;
-    if (meta.digest || meta.via === 'ref') return false;
+    if (meta.digest || meta.via === 'ref' || meta.via === 'auto') return false;
     return Agent.asksForContent(text);
   }
 
@@ -489,7 +489,9 @@ export class Agent {
     const lead = items.length > 1
       ? `找到 ${items.length} 条，先打开最近这条${when}：`
       : `打开这条${when}：`;
-    return this._openListItem(chatId, target, trigger, contextToken, { lead });
+    // via 标成 auto 而不是沿用「回序号」的 ref：日志和界面上要能一眼分开
+    // 「网关自己替你打开了」和「你回了一个 1」。以前两者都是 ref，看起来永远是"列表"。
+    return this._openListItem(chatId, target, trigger, contextToken, { lead, via: 'auto' });
   }
 
   // 「1」→ 用上一轮的 id 调"详情类"工具

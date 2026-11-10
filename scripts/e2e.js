@@ -723,6 +723,14 @@ async function main() {
     await fake._maybeOpenNewest('chain-1', rendered, 'wechat', 'CTX');
     ok('打开的是最新那封，不是列表第一条', picked?.ref?.value === 22, JSON.stringify(picked?.ref));
     ok('先说清这封是怎么冒出来的', /找到 3 条.*最近这条（今天/.test(picked?.extra?.lead || ''), picked?.extra?.lead);
+    // 日志/界面上要能分清「网关自己打开的」和「用户回了个 1」。两者都走 _openListItem，
+    // 以前都标 ref，于是在调用日志里一律显示「列表」，看着像"没用 AI"。
+    ok('自动打开标成 auto，便于和回序号区分', picked?.extra?.via === 'auto', JSON.stringify(picked?.extra));
+
+    // 已经是自动打开那一跳时，不能再套一层（读正文本身不会再出清单，但别留这个口子）
+    picked = null;
+    await fake._maybeOpenNewest('chain-6', rendered, 'wechat', 'CTX', { via: 'auto', asked: '验证码是多少' });
+    ok('自动打开那一跳不再重复触发', picked === null, JSON.stringify(picked));
 
     // 只要清单的句子不许动
     picked = null;

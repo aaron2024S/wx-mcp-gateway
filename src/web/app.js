@@ -151,7 +151,10 @@ function viaCell(r) {
     }
     return '<span class="badge ghost" title="本地索引命中，没调用 AI，不产生费用">本地</span>';
   }
-  if (r.via === 'ref') return '<span class="badge ghost" title="引用上一轮列表里的序号">列表</span>';
+  // 这两种都不是"没用 AI"，而是"这次不需要选工具"：对象上一轮就定好了，只是按序号取一条。
+  // 以前统一显示「列表」，看着像"走了本地列表匹配"，实际上跟你回「1」是同一条路。
+  if (r.via === 'auto') return '<span class="badge ghost" title="你问的是内容，网关从上一轮清单里自己打开了最近的那条">自动打开</span>';
+  if (r.via === 'ref') return '<span class="badge ghost" title="承接上一轮清单：你回了序号，按序号打开那一条">续上一条</span>';
   if (r.trigger === 'console') return '<span class="badge ghost">手动</span>';
   return '<span class="faint">—</span>';
 }
