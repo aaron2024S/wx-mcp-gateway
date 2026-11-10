@@ -19,6 +19,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // 用户搜到 1 封旅游邮件后说「总结一下大概内容」，网关回了他 20 封无关邮件）。
 const DIGEST_RE = /总结|概括|归纳|摘要|提炼|要点|大概(内容|意思|讲)|讲的?什么|讲一下|讲讲|说说|简单说/;
 
+// 「验证码是多少」「这封写了什么」「一共多少钱」——问的是**内容**，不是清单。
+// 这类话如果只回了列表，等于没回答：用户还得再回一个「1」才看得到正文。
+// 2026-11-10 实测：「steam登录验证码是多少」回了 10 条清单就停了。
+const CONTENT_RE = /验证码|校验码|动态码|激活码|正文|内容|写了?(什么|啥)|说了?(什么|啥)|讲的?(什么|啥)|怎么说的|多少钱|金额|价格|报价|单号|编号|链接/;
+// 反过来：这些词说明用户要的就是清单本身，别自作主张替他打开一条。
+const LIST_RE = /哪些|清单|列表|几封|多少封|全部|所有|汇总|统计|都有什么/;
+
 // 摘要提示词。刻意压着不让它发挥：用户在微信里要的是"这封讲了什么"，
 // 不是一篇读后感；带 markdown 星号在微信里会原样显示成一堆星号。
 const DIGEST_PROMPT = `你在微信里帮用户看一封邮件或一条查询结果，请用 3 到 5 句中文说清要点：
@@ -81,6 +88,35 @@ export class Agent {
     const s = String(text || '').trim();
     if (!s || s.length > 24) return false;
     return DIGEST_RE.test(s);
+  }
+
+  // 这句话是在问某一条的内容，还是只想要一份清单？
+  static asksForContent(text) {
+    const s = String(text || '').trim();
+    if (!s) return false;
+    if (LIST_RE.test(s)) return false;   // 「有哪些」优先当清单，别替他打开一封
+    return CONTENT_RE.test(s);
+  }
+
+  // 问内容、但这一轮只拿到清单 ⇒ 值得再走一步去打开最新那条。
+  // 三种情况不插手：本来就走摘要（摘要流程自己会读正文）、已经是「回序号」那一跳、列表为空。
+  static shouldOpenNewest(text, items, meta = {}) {
+    if (!items?.length) return false;
+    if (meta.digest || meta.via === 'ref') return false;
+    return Agent.asksForContent(text);
+  }
+
+  // 挑时间最新的那一条。全都认不出时间时退回第一条（应用一般按时间倒序给）。
+  // 只按顺序取第几条不靠谱：搜「steam」会同时命中一堆购买回执，验证码那封只是恰好排在前面。
+  static newestItem(items) {
+    if (!items?.length) return null;
+    let best = items[0];
+    let bestAt = Number.isFinite(best.at) ? best.at : null;
+    for (const it of items.slice(1)) {
+      if (!Number.isFinite(it.at)) continue;
+      if (bestAt === null || it.at > bestAt) { best = it; bestAt = it.at; }
+    }
+    return best;
   }
 
   async handle({ chatId, text, contextToken, trigger = 'wechat' }) {
@@ -355,6 +391,20 @@ export class Agent {
     // 记住列表项，供「1」引用下一步
     if (rendered.items?.length) {
       this.sessions.setLastList(chatId, rendered.items, tool.key);
+      const opened = await this._maybeOpenNewest(chatId, rendered, trigger, contextToken, meta);
+      if (opened) {
+        // 清单这一跳也记一笔。只记「读了正文」的话，事后查日志看不出它为什么读这封。
+        this._logCall({
+          trigger,
+          tool,
+          args: argv,
+          ok: !res.isError,
+          ms: res.ms || Date.now() - started,
+          err: null,
+          ...metaFields(meta),
+        });
+        return opened;
+      }
     }
 
     // 「总结一下」：拿到正文后让人话摘要，替换掉那一大段原文。
@@ -370,6 +420,9 @@ export class Agent {
         meta = { ...meta, usage: d.usage || null, provider: meta.provider || d.provider, model: meta.model || d.model };
       }
     }
+
+    // 自动打开某一条时先交代一句——否则用户不知道这封是怎么冒出来的。
+    if (meta.lead) out = `${meta.lead}\n${out}`;
 
     // 审计与历史都在推送之前落定。反过来的话，「结果已发出」和「记录已写好」
     // 之间有一个 await 的窗口，看日志的人（和测试）会读到上一条。
@@ -406,6 +459,23 @@ export class Agent {
       : '';
     await this.hooks.send(chatId, header + out, contextToken);
     return { handled: true };
+  }
+
+  // 问的是内容，却只拿到一份清单——再走一步把**最新**那条打开。
+  // 模型这一步没走错：读正文的工具要 uid，它那会儿还没有，只能先搜。
+  // 缺的是「搜完接着打开」这一跳，以前要用户自己回一个「1」。
+  async _maybeOpenNewest(chatId, rendered, trigger, contextToken, meta = {}) {
+    const items = rendered?.items || [];
+    const asked = this.sessions.get(chatId)?.lastUser || '';
+    if (!Agent.shouldOpenNewest(asked, items, meta)) return null;
+    const target = Agent.newestItem(items);
+    if (!target) return null;
+    const when = target.when ? `（${target.when}）` : '';
+    // 只有一条时不必说「找到 1 条，先打开最近这条」——绕。
+    const lead = items.length > 1
+      ? `找到 ${items.length} 条，先打开最近这条${when}：`
+      : `打开这条${when}：`;
+    return this._openListItem(chatId, target, trigger, contextToken, { lead });
   }
 
   // 「1」→ 用上一轮的 id 调"详情类"工具

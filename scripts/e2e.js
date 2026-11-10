@@ -692,6 +692,51 @@ async function main() {
     ok('schema 里没有的参数不会硬塞', captured2?.account === undefined && captured2?.uid === 7, JSON.stringify(captured2));
   }
 
+  console.log('\n=== ④j2 问内容却只拿到清单：自动打开最新那条 ===');
+  {
+    // 2026-11-10 用户截图：问「steam登录验证码是多少」，网关回了 10 条清单就停了，
+    // 得再回一个「1」才看到验证码。模型这一步没选错（读正文要 uid，它那会儿还没有），
+    // 缺的是「搜完接着打开」这一跳。
+    ok('「验证码是多少」算问内容', Agent.asksForContent('steam登录验证码是多少'));
+    ok('「有哪些邮件」算要清单，不许自作主张', !Agent.asksForContent('steam有哪些邮件'));
+    ok('「汇总一下金额」也别替他打开一封', !Agent.asksForContent('帮我汇总上个月的金额'));
+
+    const rendered = renderResult({ title: '搜索邮件' }, {
+      data: {
+        messages: [
+          { uid: 11, subject: '感谢您在 Steam 上的购买！', date: '2026-10-29T02:11:00Z' },
+          { uid: 22, subject: '您的 Steam 帐户：来自新网页或移动设备的访问', date: '2026-11-10T06:01:00Z' },
+          { uid: 33, subject: '感谢您在 Steam 上的购买！', date: '2026-09-29T08:13:00Z' },
+        ],
+      },
+    });
+    ok('列表项带上时间戳', Number.isFinite(rendered.items?.[1]?.at), JSON.stringify(rendered.items?.[1]));
+
+    // 走一遍真实决策：把 _openListItem 换成桩，只看它挑了哪一条、说了什么
+    const fake = new Agent({
+      registry: { tools: [], find: () => null },
+      config, sessions: new SessionStore({ log, confirmTtl: 60 }), log, hooks: {},
+    });
+    let picked = null;
+    fake._openListItem = async (chatId, ref, trigger, ctx, extra) => { picked = { ref, extra }; return { handled: true }; };
+    fake.sessions.get('chain-1').lastUser = 'steam登录验证码是多少';
+    await fake._maybeOpenNewest('chain-1', rendered, 'wechat', 'CTX');
+    ok('打开的是最新那封，不是列表第一条', picked?.ref?.value === 22, JSON.stringify(picked?.ref));
+    ok('先说清这封是怎么冒出来的', /找到 3 条.*最近这条（今天/.test(picked?.extra?.lead || ''), picked?.extra?.lead);
+
+    // 只要清单的句子不许动
+    picked = null;
+    fake.sessions.get('chain-2').lastUser = 'steam有哪些邮件';
+    await fake._maybeOpenNewest('chain-2', rendered, 'wechat', 'CTX');
+    ok('要清单时不插手', picked === null, JSON.stringify(picked));
+
+    // 「回序号」那一跳不能再套一层
+    picked = null;
+    fake.sessions.get('chain-3').lastUser = '这封写了什么';
+    await fake._maybeOpenNewest('chain-3', rendered, 'wechat', 'CTX', { via: 'ref' });
+    ok('已经是在打开某一条时不再自动打开', picked === null, JSON.stringify(picked));
+  }
+
   console.log('\n=== ④k 参数与正文：模型读到的要用上，机器信头别占屏 ===');
   {
     // ① 「帮我找一封有关旅游的邮件」里明明有关键词，早先却回「还差一个关键词」。
@@ -909,6 +954,22 @@ async function main() {
     ok('回序号后读第 2 条，并且带着摘要意图',
       pickedD?.a?.uid === 2 && pickedD?.meta?.digest === true,
       JSON.stringify({ a: pickedD?.a, digest: pickedD?.meta?.digest }));
+
+    // 问「内容」却只拿到清单，等于没回答。2026-11-10 用户截图：「steam登录验证码是多少」
+    // 网关回了 10 条清单就停了，得再回一个「1」才看到验证码。模型没选错（读正文要 uid），
+    // 缺的是「搜完接着打开最新那封」这一跳。走真实链路跑一遍，不只是验决策函数。
+    outbox.length = 0;
+    calls.length = 0;
+    il.push({ from_user_id: 'wxid_me', context_token: 'CTX-D5', msg_id: 'mD5', item_list: [{ type: 1, text_item: { text: 'steam登录验证码是多少' } }] });
+    for (let i = 0; i < 60 && !outbox.length; i++) await sleep(100);
+    const chainCalls = calls.map((c) => c.name);
+    ok('问内容时自己接着打开，不用再回「1」',
+      chainCalls.includes('search_messages') && chainCalls.includes('read_message'), JSON.stringify(chainCalls));
+    ok('打开的正是搜到的那封',
+      calls.find((c) => c.name === 'read_message')?.args?.uid === 201,
+      JSON.stringify(calls.find((c) => c.name === 'read_message')?.args));
+    ok('先交代一句，再给正文',
+      /打开这条/.test(outbox.at(-1) || '') && /境内旅游合同/.test(outbox.at(-1) || ''), outbox.at(-1));
 
     // 复原，别把额外工具留给后面的用例
     EXTRA_TOOLS.length = 0;

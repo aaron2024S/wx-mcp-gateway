@@ -7,6 +7,8 @@
 
 const NAME_KEYS = ['subject', 'title', 'name', 'label', 'file_name', 'filename', 'text', 'summary', 'id', 'uid'];
 const SUB_KEYS = ['from', 'sender', 'author', 'date', 'time', 'created_at', 'updated_at', 'size', 'count', 'unread'];
+// 时间字段的几种常见写法。列邮件/记录的工具几乎都用这几个键之一。
+const TIME_KEYS = ['date', 'time', 'created_at', 'updated_at', 'received_at', 'sent_at', 'timestamp'];
 
 const RISK_LABEL = { read: '只读', write: '写入', high: '高危' };
 
@@ -230,6 +232,27 @@ function humanTime(v) {
   return d.getFullYear() === now.getFullYear() ? `${md} ${hm}` : `${d.getFullYear()}-${md} ${hm}`;
 }
 
+// 列表项的时间，用来挑「最近的那一条」。应用给的常是 ISO，也有给 Unix 秒/毫秒的；
+// 认不出来就返回 null，调用方退回「按应用给的顺序取第一条」。
+// 2026-11-10 实测：「steam登录验证码是多少」要的是**最新**那封验证码邮件，
+// 而搜索结果里混着一堆购买回执——按顺序取第几条不靠谱，得按时间。
+function timeOf(item) {
+  if (!isPlain(item)) return null;
+  for (const k of TIME_KEYS) {
+    const v = item[k];
+    if (typeof v === 'number' && v > 0) {
+      const at = v < 1e12 ? v * 1000 : v;   // 秒 / 毫秒
+      return { at, when: humanTime(new Date(at).toISOString()) };
+    }
+    if (typeof v !== 'string' || !v.trim()) continue;
+    if (/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/.test(v)) {
+      const at = Date.parse(v.replace(' ', 'T'));
+      if (!Number.isNaN(at)) return { at, when: humanTime(v) };
+    }
+  }
+  return null;
+}
+
 // 邮件信头里的「认证结果」「Return-Path」是给模型判断钓鱼用的机器串，
 // 应用习惯把它们拼在正文前面。例如：
 //   认证结果：mx.qq.com; spf=pass smtp.mailfrom=<econtract@pushmail…> (ip=205.205.208.10) …
@@ -289,7 +312,7 @@ function itemLine(item, idx) {
     if (k === 'size' || k === 'count' || k === 'unread') continue;
     const v = item[k];
     if (v === undefined || v === null || v === '') continue;
-    const isTimeKey = k === 'date' || k === 'time' || k === 'created_at' || k === 'updated_at';
+    const isTimeKey = TIME_KEYS.includes(k);
     const s = brief(isTimeKey ? humanTime(v) : v, 24);
     if (s && s !== name) subs.push(s);
     if (subs.length >= 2) break;
@@ -360,8 +383,12 @@ export function renderResult(tool, res, { limit = 8 } = {}) {
           if (typeof it.account === 'string' && it.account.trim()) extra.account = it.account;
           if (typeof it.folder === 'string' && it.folder.trim()) extra.folder = it.folder;
         }
+        // 带上时间戳：用户问「验证码是多少」时，下一步要挑**最新**那封打开，
+        // 而搜索结果里往往混着一堆同发件人的旧邮件（购买回执之类）。
+        const t = timeOf(it);
         items.push({
           label, argKey: id.key, value: id.value,
+          ...(t ? { at: t.at, when: t.when } : {}),
           ...(Object.keys(extra).length ? { extra } : {}),
         });
       }
