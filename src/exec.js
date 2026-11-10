@@ -361,10 +361,14 @@ function humanError(raw) {
 // 原来的行里只有「[QQ邮箱] 华为开发者联盟 · 【通知】… · 今天 17:57」，一个可用的
 // 标识都没有，模型要读正文只能瞎猜 uid——2026-11-10 线上实测就是连猜几个，
 // 每次都被回「邮件不存在」，五轮烧光后不了了之。
-function locatorOf(id, extra = {}) {
+function locatorOf(id, extra = {}, item = null) {
   const parts = [`${id.key}=${id.value}`];
   if (extra.account) parts.push(`account=${extra.account}`);
   if (extra.folder) parts.push(`folder=${extra.folder}`);
+  // 文件夹这种条目，显示的是 name，真正能当参数用的是 path（「已发送」的实际路径
+  // 可能是 Sent Messages）。两个不一样就一起给，省得模型拿着显示名去猜。
+  const p = isPlain(item) && typeof item.path === 'string' ? item.path.trim() : '';
+  if (p && p !== String(id.value) && !extra.folder) parts.push(`path=${p}`);
   return `  → ${parts.join('，')}`;
 }
 
@@ -408,7 +412,7 @@ export function renderResult(tool, res, { limit = 8, forModel = false } = {}) {
         ...(t ? { at: t.at, when: t.when } : {}),
         ...(Object.keys(extra).length ? { extra } : {}),
       });
-      lines.push(forModel ? `${line}${locatorOf(id, extra)}` : line);
+      lines.push(forModel ? `${line}${locatorOf(id, extra, it)}` : line);
     }
     if (found.list.length > shown.length) {
       lines.push(`（还有 ${found.list.length - shown.length} 条没列出来）`);
