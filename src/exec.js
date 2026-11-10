@@ -354,10 +354,27 @@ function humanError(raw) {
   return s.slice(0, 400);
 }
 
+// 每条列表项后面补一段「继续操作时该传什么」。只给模型看，不给用户看——
+// 用户看到「uid=422 · folder=INBOX」只会问「这是什么」。
+//
+// 为什么必须有：闭环里模型拿到的是**渲染后的文本**，不是应用的原始 JSON。
+// 原来的行里只有「[QQ邮箱] 华为开发者联盟 · 【通知】… · 今天 17:57」，一个可用的
+// 标识都没有，模型要读正文只能瞎猜 uid——2026-11-10 线上实测就是连猜几个，
+// 每次都被回「邮件不存在」，五轮烧光后不了了之。
+function locatorOf(id, extra = {}) {
+  const parts = [`${id.key}=${id.value}`];
+  if (extra.account) parts.push(`account=${extra.account}`);
+  if (extra.folder) parts.push(`folder=${extra.folder}`);
+  return `  → ${parts.join('，')}`;
+}
+
 /**
+ * @param {object} [o]
+ * @param {number} [o.limit]    列表最多渲染几条
+ * @param {boolean} [o.forModel] 给模型看：每行补上 uid/account/folder 这类定位参数
  * @returns {{ text: string, items?: Array<{label:string, key:string, value:any}> }}
  */
-export function renderResult(tool, res, { limit = 8 } = {}) {
+export function renderResult(tool, res, { limit = 8, forModel = false } = {}) {
   if (res.isError) {
     return { text: `没能完成「${tool.title || tool.name}」。\n${humanError(res.text)}` };
   }
@@ -368,30 +385,30 @@ export function renderResult(tool, res, { limit = 8 } = {}) {
     const shown = found.list.slice(0, limit);
     const lines = [
       `「${tool.title || tool.name}」共 ${found.list.length} 条${found.list.length > shown.length ? `，先看前 ${shown.length} 条` : ''}：`,
-      ...shown.map((it, i) => itemLine(it, i + 1)),
     ];
     const items = [];
     for (const [i, it] of shown.entries()) {
+      const line = itemLine(it, i + 1);
       const id = idOf(it);
-      if (id) {
-        const label = itemLine(it, i + 1).replace(/^\d+\.\s*/, '').split('  [')[0];
-        // uid 只在单个账号、单个文件夹内唯一。跨账号列表（未读邮件就是典型）必须把账号
-        // 一起记住，否则用户回「1」之后下一步拿到 uid 也定位不到是哪封信；
-        // 搜出来 / 列出来的信不在收件箱时同理，得带上它所在的文件夹。
-        const extra = {};
-        if (id.key === 'uid') {
-          if (typeof it.account === 'string' && it.account.trim()) extra.account = it.account;
-          if (typeof it.folder === 'string' && it.folder.trim()) extra.folder = it.folder;
-        }
-        // 带上时间戳：用户问「验证码是多少」时，下一步要挑**最新**那封打开，
-        // 而搜索结果里往往混着一堆同发件人的旧邮件（购买回执之类）。
-        const t = timeOf(it);
-        items.push({
-          label, argKey: id.key, value: id.value,
-          ...(t ? { at: t.at, when: t.when } : {}),
-          ...(Object.keys(extra).length ? { extra } : {}),
-        });
+      if (!id) { lines.push(line); continue; }
+      const label = line.replace(/^\d+\.\s*/, '').split('  [')[0];
+      // uid 只在单个账号、单个文件夹内唯一。跨账号列表（未读邮件就是典型）必须把账号
+      // 一起记住，否则用户回「1」之后下一步拿到 uid 也定位不到是哪封信；
+      // 搜出来 / 列出来的信不在收件箱时同理，得带上它所在的文件夹。
+      const extra = {};
+      if (id.key === 'uid') {
+        if (typeof it.account === 'string' && it.account.trim()) extra.account = it.account.trim();
+        if (typeof it.folder === 'string' && it.folder.trim()) extra.folder = it.folder.trim();
       }
+      // 带上时间戳：用户问「验证码是多少」时，下一步要挑**最新**那封打开，
+      // 而搜索结果里往往混着一堆同发件人的旧邮件（购买回执之类）。
+      const t = timeOf(it);
+      items.push({
+        label, argKey: id.key, value: id.value,
+        ...(t ? { at: t.at, when: t.when } : {}),
+        ...(Object.keys(extra).length ? { extra } : {}),
+      });
+      lines.push(forModel ? `${line}${locatorOf(id, extra)}` : line);
     }
     if (found.list.length > shown.length) {
       lines.push(`（还有 ${found.list.length - shown.length} 条没列出来）`);
@@ -408,7 +425,11 @@ export function renderResult(tool, res, { limit = 8 } = {}) {
     if (srcs.size > 1) {
       lines.push(`（以上是 ${srcs.size} 个邮箱合并的结果，方括号里是来源邮箱）`);
     }
-    lines.push('回复序号可对某一条继续操作。');
+    // 闭环里没有「用户回序号」这回事——序号是渲染出来的，模型得自己调工具。
+    // 直接说「回复序号」会让它把这句话原样回给用户，或者干脆放弃。
+    lines.push(forModel
+      ? '（要读某一封或对它做别的操作，调用相应的工具，参数用该行「→」后面的值；序号只是给你看的）'
+      : '回复序号可对某一条继续操作。');
     return { text: lines.join('\n'), items };
   }
 

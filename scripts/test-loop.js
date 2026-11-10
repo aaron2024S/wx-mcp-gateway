@@ -9,6 +9,7 @@
 // 写操作会不会被拦下来。
 import http from 'node:http';
 import { agentLoop } from '../src/llm.js';
+import { renderResult } from '../src/exec.js';
 
 let pass = 0; let fail = 0;
 function ok(name) { pass += 1; console.log(`  ✓ ${name}`); }
@@ -203,6 +204,51 @@ async function main() {
     const sentNames = llm.seen[0].tools.map((t) => t.function.name);
     truthy('发给模型的名字里没有点号', sentNames.every((n) => /^[a-zA-Z0-9_-]{1,64}$/.test(n)));
     eq('回调拿到的是内部原名', used[0], 'mail.search_messages');
+    llm.close();
+  }
+
+  // ⑦ 列表渲染：给模型的那份必须带 uid/account/folder，给用户的那份一个都不能带
+  //
+  // 2026-11-10 线上：用户问「今天的邮件」→ 模型列了 3 封 → 用户说「华为的」→
+  // 模型要读正文，但渲染出来的行里只有「[QQ邮箱] 华为开发者联盟 · 通知 · 今天 17:57」，
+  // 没有任何定位信息，它只能挨个猜 uid，每次都撞「邮件不存在」，五轮烧完放弃。
+  {
+    const res = {
+      data: {
+        total: 2,
+        messages: [
+          { uid: 423, account: 'QQ邮箱', folder: 'INBOX', subject: '测试邮件', from: 'a@163.com', date: '2026-11-10T11:42:27.000Z', unread: true },
+          { uid: 422, account: 'QQ邮箱', folder: 'INBOX', subject: '华为开发者联盟通知', from: 'news@huawei.com', date: '2026-11-10T09:57:02.000Z', unread: true },
+        ],
+      },
+    };
+    const tool = { title: '列出邮件', name: 'list_messages' };
+    const forModel = renderResult(tool, res, { forModel: true }).text;
+    const forUser = renderResult(tool, res).text;
+    truthy('给模型的文本带 uid', /uid=422/.test(forModel));
+    truthy('给模型的文本带账号与文件夹', /account=QQ邮箱/.test(forModel) && /folder=INBOX/.test(forModel));
+    truthy('给用户的文本不带 uid', !/uid=/.test(forUser));
+    truthy('给用户的文本不带 account=', !/account=/.test(forUser));
+    truthy('给模型的不再说「回复序号」', !/回复序号/.test(forModel));
+    eq('两种渲染的条目都没少', forModel.split('\n').length, forUser.split('\n').length);
+  }
+
+  // ⑧ trace 存的是给用户看的版本：模型看到 uid，日志和兜底消息看不到
+  {
+    const llm = await mockLlm([{ tool: 'search_messages', args: { query: '华为' } }, '没找到正文']);
+    const r = await agentLoop({
+      text: '华为那封写了啥',
+      tools: TOOLS,
+      config: cfg(llm.url),
+      execute: async () => ({
+        ok: false,
+        text: '「搜索邮件」共 1 条：\n1. 华为通知  → uid=422，account=QQ邮箱',
+        visible: '「搜索邮件」共 1 条：\n1. 华为通知',
+      }),
+    });
+    const toolMsg = llm.seen[1].messages.filter((m) => m.role === 'tool')[0]?.content || '';
+    truthy('模型拿到的是带 uid 的那份', /uid=422/.test(toolMsg));
+    truthy('trace 里是给人看的那份', !/uid=/.test(r.trace[0].text) && /华为通知/.test(r.trace[0].text));
     llm.close();
   }
 

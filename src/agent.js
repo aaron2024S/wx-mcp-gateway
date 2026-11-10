@@ -368,7 +368,7 @@ export class Agent {
         history: this._history(chatId),
         maxRounds,
         maxMs,
-        execute: (name, args) => this._loopExec(name, args),
+        execute: (name, args) => this._loopExec(chatId, name, args),
       });
     } catch (e) {
       // 闭环失败绝不能变成"这次没回话"：记一笔原因，让它走原来的单轮路径
@@ -387,15 +387,25 @@ export class Agent {
 
     const answer = String(r.text || '').trim();
     if (!answer) {
-      // 没答出来（轮数用尽/超时/原地打转）：把已经查到的摆出来，别让人白等
-      const last = [...(r.trace || [])].reverse().find((t) => t.text);
+      // 没答出来（轮数用尽/超时/原地打转）：把已经查到的摆出来，别让人白等。
+      // 只挑成功的那一步——失败那步的文本是「没能完成「读取邮件正文」。执行失败：邮件不存在」，
+      // 原样发给用户等于把工具的报错甩到他脸上：看不懂，也不知道下一步能做什么。
+      const traces = r.trace || [];
+      const last = [...traces].reverse().find((t) => t.text && t.ok !== false);
       if (last) {
         const tail = last.text.length > 600 ? `${last.text.slice(0, 600)}…` : last.text;
-        await this.hooks.send(chatId, `这一步没查完（${r.stop}）。先把我找到的给你：\n${tail}`, contextToken);
+        await this.hooks.send(chatId, `这一步没走完，先把我查到的给你：\n${tail}`, contextToken);
         this.sessions.pushTurn(chatId, {
           user: this.sessions.get(chatId)?.lastUser || raw,
           toolTitle: last.tool, args: last.args, result: tail, kind: 'text',
         });
+        return { handled: true };
+      }
+      if (traces.length) {
+        // 全失败：说一句人话，别报内部停因（max-rounds / no-progress 这些词跟用户没关系）
+        await this.hooks.send(chatId, r.stop === 'timeout'
+          ? '这一步花的时间太长，先停在这儿了。等会儿再问一次？'
+          : '这次没查成，工具连着报错。换个说法我再试一次？', contextToken);
         return { handled: true };
       }
       return null;
@@ -423,7 +433,7 @@ export class Agent {
   }
 
   // 闭环里的单步执行：只读工具直接跑；写/高危一律 halt，交回确认流程。
-  async _loopExec(name, args) {
+  async _loopExec(chatId, name, args) {
     const tool = this.registry.find(name);
     if (!tool) return { ok: false, text: `没有叫「${name}」的工具。只能用清单里有的工具，不要自己编名字。` };
     if (tool.risk !== 'read') return { halt: { tool, args } };
@@ -435,12 +445,20 @@ export class Agent {
     }
     try {
       const res = await runTool(this.registry, tool, argv, 25000);
-      const rendered = renderResult(tool, res, { limit: 10 });
+      // 两份渲染：一份给模型（每行补 uid/account/folder，它才能正确读正文），
+      // 一份给用户（没有内部参数）。只渲染一次的话，要么模型猜不到 uid，
+      // 要么 uid 出现在微信里——2026-11-10 线上就是前者：连猜几封都是「邮件不存在」。
+      const rendered = renderResult(tool, res, { limit: 10, forModel: true });
       let txt = String(rendered?.text || '');
       // 结果压缩：一封长正文 8000 字，五轮下来会把上下文顶爆。摘要层只留前 2000 字，
       // 够模型判断"这封是不是我要的"，不够的话它还能再调一次读更多。
       if (txt.length > 2000) txt = `${txt.slice(0, 2000)}\n[结果已截断]`;
-      return { ok: !res.isError, text: txt, sig: `${name}|${JSON.stringify(argv)}` };
+      const plain = String(renderResult(tool, res, { limit: 10 }).text || '');
+      // 闭环里列出来的这批也要记进会话：① 用户看完回答回「2」时能直接定位到这一封，
+      // 不用再让模型猜一次；② 不然 lastList 里躺的还是上一次单轮留下的旧列表，
+      // 10 分钟内的「1」会打开一封完全不相干的邮件。
+      if (rendered?.items?.length) this.sessions.setLastList(chatId, rendered.items, tool.key);
+      return { ok: !res.isError, text: txt, visible: plain !== txt ? plain : null, sig: `${name}|${JSON.stringify(argv)}` };
     } catch (e) {
       return { ok: false, text: `调用失败：${e?.message || e}`, sig: `${name}|${JSON.stringify(argv)}` };
     }

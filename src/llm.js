@@ -584,7 +584,10 @@ export async function agentLoop({ text, tools, config, history = [], execute, ma
       lastSig = sig;
     }
 
-    trace.push({ tool: realName, args: s.args || {}, ok: r?.ok !== false, text: String(r?.text || '') });
+    // trace 里存「给用户看的」版本：执行层返回 visible 时以它为准。
+    // 模型看到的那份会带 uid/account/folder 这类定位参数（不给 uid 它只能瞎猜），
+    // 而 trace 会在「没查完」时被原样发给用户，内部参数一个都不能露出去。
+    trace.push({ tool: realName, args: s.args || {}, ok: r?.ok !== false, text: String((r?.visible ?? r?.text) || '') });
     s.wireName = wireOf.get(realName) || s.tool;
     adapter.pushCall(messages, s);
     adapter.pushResult(messages, s, String(r?.text || '（没有内容）'));
