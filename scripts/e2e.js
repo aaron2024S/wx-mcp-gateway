@@ -121,6 +121,29 @@ function mockMcp() {
           });
         }
         if (name === 'search_messages') {
+          const q = String(args?.query || '');
+          // 「验证码」这类泛词在真实应用里要靠正文命中——正文还没下载进索引时
+          // 就是空手。这里如实复刻，好验证网关会不会自己换个词再搜一次。
+          if (/验证码/.test(q) && !/steam/i.test(q)) {
+            return reply({
+              content: [{ type: 'text', text: JSON.stringify({ total: 0, messages: [] }) }],
+            });
+          }
+          if (/steam/i.test(q)) {
+            return reply({
+              content: [{
+                type: 'text',
+                text: JSON.stringify({
+                  total: 1,
+                  messages: [{
+                    uid: 301, subject: '您的 Steam 帐户：来自新网页或移动设备的访问',
+                    account: 'Outlook', folder: 'INBOX',
+                    from: { name: 'Steam' }, date: '2026-11-10T06:01:00Z', seen: false,
+                  }],
+                }),
+              }],
+            });
+          }
           // 复刻 11-09 那个场景：按「旅游」只搜到 1 封，用户接着说「总结一下大概内容」
           return reply({
             content: [{
@@ -136,6 +159,15 @@ function mockMcp() {
           });
         }
         if (name === 'read_message') {
+          if (args?.uid === 301) {
+            return reply({
+              content: [{
+                type: 'text',
+                text: '主题：您的 Steam 帐户：来自新网页或移动设备的访问\n发件人：Steam <noreply@steampowered.com>\n'
+                  + '时间：2026-11-10 14:01\n附件：无\n\n您正在尝试使用新设备登录。此处是验证码：\n登录代码 ABCDF',
+              }],
+            });
+          }
           return reply({
             content: [{
               type: 'text',
@@ -701,6 +733,26 @@ async function main() {
     ok('「有哪些邮件」算要清单，不许自作主张', !Agent.asksForContent('steam有哪些邮件'));
     ok('「汇总一下金额」也别替他打开一封', !Agent.asksForContent('帮我汇总上个月的金额'));
 
+    // 关键词摘取：剥掉指令和疑问，留下实体词。拉丁词排前面（区分度最高）。
+    const kw = Agent.keywords('steam登录验证码是多少');
+    ok('从问句里摘出实体词', kw[0] === 'steam' && kw.includes('登录验证码'), JSON.stringify(kw));
+    ok('纯指令句摘不出东西', Agent.keywords('最近有哪些未读邮件').length === 0, JSON.stringify(Agent.keywords('最近有哪些未读邮件')));
+
+    // 换词重搜：模型把泛词当 query 时，用原话里的实体词再搜一次
+    const sTool = {
+      name: 'search_messages',
+      inputSchema: { type: 'object', properties: { query: {}, account: {}, folder: {} }, required: ['query'] },
+    };
+    const alts = Agent.altQueries(sTool, { query: '验证码' }, 'steam登录验证码是多少');
+    ok('泛词搜空时会换实体词重搜', alts[0]?.query === 'steam', JSON.stringify(alts.map((a) => a.query)));
+    ok('已经用的词不会再搜一遍',
+      !Agent.altQueries(sTool, { query: '发票' }, '帮我找一下发票').length);
+    // 多词查询在应用侧是 AND，正文没进索引就必然落空 —— 拆开单搜更稳
+    const multi = Agent.altQueries(sTool, { query: 'steam 验证码' }, 'steam 验证码');
+    ok('多词查询会拆开重试', multi.map((a) => a.query).join(',') === 'steam,验证码', JSON.stringify(multi.map((a) => a.query)));
+    ok('没有 query 参数的工具不折腾',
+      Agent.altQueries({ name: 'list_messages', inputSchema: { properties: { account: {} } } }, { account: 'x' }, '验证码').length === 0);
+
     const rendered = renderResult({ title: '搜索邮件' }, {
       data: {
         messages: [
@@ -711,6 +763,25 @@ async function main() {
       },
     });
     ok('列表项带上时间戳', Number.isFinite(rendered.items?.[1]?.at), JSON.stringify(rendered.items?.[1]));
+
+    // 泛词会同时命中好几家：搜「验证码」既有 GitHub 也有 Steam，最新那封未必是要的。
+    // 原话里还有实体词时先按它过滤，再在像的里面取最新。
+    const mixed = renderResult({ title: '搜索邮件' }, {
+      data: {
+        messages: [
+          { uid: 41, from: 'GitHub <noreply@github.com>', subject: '您的验证码是 941023', date: '2026-11-10T10:00:00Z' },
+          { uid: 42, from: 'Steam <noreply@steampowered.com>', subject: '您的 Steam 帐户：来自新网页或移动设备的访问', date: '2026-11-10T06:01:00Z' },
+          { uid: 43, from: '招商银行', subject: '动态验证码', date: '2026-11-09T01:00:00Z' },
+        ],
+      },
+    });
+    ok('问 steam 时挑的是 Steam 那封，不是更新的 GitHub',
+      Agent.bestItem(mixed.items, 'steam登录验证码是多少')?.value === 42,
+      JSON.stringify(mixed.items.map((i) => [i.value, i.label.slice(0, 18)])));
+    ok('问 github 时挑的是 GitHub 那封',
+      Agent.bestItem(mixed.items, 'github 的验证码')?.value === 41, String(Agent.bestItem(mixed.items, 'github 的验证码')?.value));
+    ok('没有实体词时退回最新那封',
+      Agent.bestItem(mixed.items, '验证码是多少')?.value === 41, String(Agent.bestItem(mixed.items, '验证码是多少')?.value));
 
     // 走一遍真实决策：把 _openListItem 换成桩，只看它挑了哪一条、说了什么
     const fake = new Agent({
@@ -991,6 +1062,27 @@ async function main() {
       JSON.stringify(calls.find((c) => c.name === 'read_message')?.args));
     ok('先交代一句，再给正文',
       /打开这条/.test(outbox.at(-1) || '') && /境内旅游合同/.test(outbox.at(-1) || ''), outbox.at(-1));
+
+    // 另一种失败形态：模型把泛词（验证码）填成关键词，而应用侧这类词只能靠正文命中，
+    // 正文没进索引就是空手。网关得自己换个词重搜，而不是把「没搜到」直接甩给用户。
+    const llm2 = await mockLlm({ pick: () => 'search_messages', args: JSON.stringify({ query: '验证码' }) });
+    config.llm = {
+      enabled: true, default: 'mock2', timeout: 5, max_tokens: 256,
+      providers: { mock2: { type: 'openai', base_url: llm2.url, model: 'deepseek-flash', api_key: 'k' } },
+    };
+    outbox.length = 0;
+    calls.length = 0;
+    il.push({ from_user_id: 'wxid_me', context_token: 'CTX-D6', msg_id: 'mD6', item_list: [{ type: 1, text_item: { text: 'steam登录验证码是多少' } }] });
+    for (let i = 0; i < 60 && !outbox.length; i++) await sleep(100);
+    const queries = calls.filter((c) => c.name === 'search_messages').map((c) => c.args?.query);
+    ok('搜「验证码」空手时换词重搜，不直接把「没搜到」甩出去',
+      queries.length >= 2 && queries[0] === '验证码' && queries.includes('steam'), JSON.stringify(queries));
+    ok('换词命中后照样接着打开正文',
+      calls.find((c) => c.name === 'read_message')?.args?.uid === 301, JSON.stringify(calls.map((c) => c.name)));
+    ok('换过词要交代清楚，不能假装是「验证码」搜出来的',
+      /换成「steam」/.test(outbox.at(-1) || ''), outbox.at(-1));
+    ok('验证码真的出现在回复里', /ABCDF/.test(outbox.at(-1) || ''), outbox.at(-1));
+    await new Promise((r) => llm2.server.close(r));
 
     // 复原，别把额外工具留给后面的用例
     EXTRA_TOOLS.length = 0;

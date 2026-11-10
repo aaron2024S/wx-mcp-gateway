@@ -26,6 +26,23 @@ const CONTENT_RE = /验证码|校验码|动态码|激活码|正文|内容|写了
 // 反过来：这些词说明用户要的就是清单本身，别自作主张替他打开一条。
 const LIST_RE = /哪些|清单|列表|几封|多少封|全部|所有|汇总|统计|都有什么/;
 
+// 「从这句话里还能拿什么去搜」——中文没空格，只能靠停用词切。
+// 剥掉的是**指令和疑问**那部分，留下的是**实体**（steam、招商银行、发票）。
+// 顺序无所谓，用的时候按长度从长到短替换，避免「是不是」被「是」先啃掉半截。
+const STOP_WORDS = [
+  '帮我', '帮忙', '麻烦', '给我', '替我', '能不能', '可不可以', '可以', '一下',
+  '找找', '找', '查查', '查', '搜搜', '搜', '看看', '看', '打开', '读读', '读', '列一下', '列出',
+  '那个', '这个', '那封', '这封', '刚才', '之前', '最新', '最近', '现在', '今天', '昨天',
+  '哪些', '有几封', '几封', '多少封', '多少', '什么', '啥', '是不是', '有没有', '没有',
+  '邮件', '信件', '收件箱', '里面', '正文', '内容', '关于', '消息',
+  '是', '的', '了', '吗', '呢', '吧', '啊', '我', '你', '他', '她', '它', '和', '与', '在', '到', '给', '把', '有',
+];
+const STOP_RE = new RegExp(
+  STOP_WORDS.slice().sort((a, b) => b.length - a.length)
+    .map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'),
+  'g',
+);
+
 // 摘要提示词。刻意压着不让它发挥：用户在微信里要的是"这封讲了什么"，
 // 不是一篇读后感；带 markdown 星号在微信里会原样显示成一堆星号。
 const DIGEST_PROMPT = `你在微信里帮用户看一封邮件或一条查询结果，请用 3 到 5 句中文说清要点：
@@ -117,6 +134,65 @@ export class Agent {
       if (bestAt === null || it.at > bestAt) { best = it; bestAt = it.at; }
     }
     return best;
+  }
+
+  // 从一句话里摘「可能是检索词」的片段。
+  // 拉丁词（steam / noreply@github.com）区分度最高，排在前面；中文则剥掉指令词后
+  // 取剩下的连续汉字块。不求分得准——它只用来决定「还能换哪个词去搜」。
+  static keywords(text) {
+    const s = String(text || '').toLowerCase();
+    if (!s) return [];
+    const out = [];
+    for (const m of s.matchAll(/[a-z0-9][a-z0-9._@+-]*[a-z0-9]|[a-z0-9]/g)) {
+      const w = m[0].replace(/[._@+-]+$/, '');
+      if (w.length >= 2 && !/^\d+$/.test(w)) out.push(w);
+    }
+    const stripped = s.replace(/[^\u4e00-\u9fff]+/g, ' ').replace(STOP_RE, ' ').replace(/\s+/g, ' ').trim();
+    for (const blk of stripped.split(' ')) {
+      const t = blk.trim();
+      if (t.length >= 2 && t.length <= 12) out.push(t);
+    }
+    return [...new Set(out)];
+  }
+
+  // 搜了个空之后，还能换成什么词再搜。只有带 query 类参数的工具才用得上。
+  // 多词查询优先拆开：mailnest 的全文索引是 AND 连接，正文没进索引时
+  // 「steam 验证码」这种两词查询必然落空，单搜其中一个反而能命中。
+  static altQueries(tool, argv, asked, max = 2) {
+    const props = tool?.inputSchema?.properties || {};
+    const qkey = ['query', 'q', 'keyword', 'keywords'].find((k) => k in props && k in argv);
+    if (!qkey) return [];
+    const cur = String(argv[qkey] || '').trim();
+    const cand = [];
+    if (/\s/.test(cur)) cand.push(...cur.split(/\s+/).filter((w) => w.length >= 2));
+    cand.push(...Agent.keywords(asked));
+    const seen = new Set([cur.toLowerCase()]);
+    const out = [];
+    for (const w of cand) {
+      const k = String(w).toLowerCase();
+      if (k.length < 2 || k.length > 40 || seen.has(k)) continue;
+      seen.add(k);
+      out.push({ ...argv, [qkey]: w });
+      if (out.length >= max) break;
+    }
+    return out;
+  }
+
+  // 命中的多条里挑「最像」的那条，再在像的中挑最新的。
+  // 只按时间挑会栽在泛词上：「验证码」会同时命中 GitHub、银行、外卖平台，
+  // 最新那封可能根本不是用户在等的那家。原话里还有词（steam）时先按它过滤。
+  static bestItem(items, asked) {
+    if (!items?.length) return null;
+    const words = Agent.keywords(asked);
+    if (words.length) {
+      const hit = items.filter((it) => {
+        const s = String(it.label || '').toLowerCase();
+        return words.some((w) => s.includes(w));
+      });
+      // 一半以上都「像」等于没筛（泛词把整个列表都命中了），这时过滤没意义
+      if (hit.length && hit.length < items.length) return Agent.newestItem(hit);
+    }
+    return Agent.newestItem(items);
   }
 
   async handle({ chatId, text, contextToken, trigger = 'wechat' }) {
@@ -390,7 +466,35 @@ export class Agent {
     }
 
     const res = await p;
-    const rendered = renderResult(tool, res);
+    let usedArgs = argv;
+    let rendered = renderResult(tool, res);
+
+    // 搜了个空，先别急着回「没搜到」。
+    // 模型常把话里最显眼的词填成关键词（问「steam 验证码是多少」填「验证码」），
+    // 而泛词基本只能靠正文命中——正文还没下载进索引，就必然落空。
+    // 用户原话里通常还有一个更强的词（steam），换它再搜一次往往直接命中。
+    // 最多补两次，命中就停；失败时仍用原查询的结果，文案才对得上用户问的那句。
+    let swapped = null;
+    if (!res.isError && !rendered.items?.length) {
+      const asked = String(meta.asked || this.sessions.get(chatId)?.lastUser || '');
+      for (const alt of Agent.altQueries(tool, argv, asked)) {
+        const r2 = await runTool(this.registry, tool, alt, timeoutMs);
+        const rd2 = renderResult(tool, r2);
+        if (rd2.items?.length) {
+          const k = Object.keys(alt).find((x) => alt[x] !== argv[x]);
+          swapped = { from: argv[k], to: alt[k] };
+          usedArgs = alt;
+          rendered = rd2;
+          this.log?.info?.('open', `搜「${argv[k]}」没结果，换「${alt[k]}」命中 ${rd2.items.length} 条`);
+          break;
+        }
+      }
+    }
+    // 换过词就得交代清楚，否则用户以为这是「验证码」搜出来的。
+    const note = swapped && rendered.items?.length
+      ? `没搜到带「${swapped.from}」的邮件，换成「${swapped.to}」找到 ${rendered.items.length} 封：`
+      : null;
+    if (note) meta = { ...meta, note };
 
     // 记住列表项，供「1」引用下一步
     if (rendered.items?.length) {
@@ -401,7 +505,7 @@ export class Agent {
         this._logCall({
           trigger,
           tool,
-          args: argv,
+          args: usedArgs,
           ok: !res.isError,
           ms: res.ms || Date.now() - started,
           err: null,
@@ -430,14 +534,16 @@ export class Agent {
     }
 
     // 自动打开某一条时先交代一句——否则用户不知道这封是怎么冒出来的。
+    // 换过关键词的情况也要说，不然用户以为这是「验证码」搜出来的。
     if (meta.lead) out = `${meta.lead}\n${out}`;
+    else if (meta.note) out = `${meta.note}\n${out}`;
 
     // 审计与历史都在推送之前落定。反过来的话，「结果已发出」和「记录已写好」
     // 之间有一个 await 的窗口，看日志的人（和测试）会读到上一条。
     this._logCall({
       trigger,
       tool,
-      args: argv,
+      args: usedArgs,
       ok: !res.isError,
       ms: res.ms || Date.now() - started,
       err: res.isError ? String(res.text || '').slice(0, 120) : null,
@@ -456,7 +562,7 @@ export class Agent {
       this.sessions.pushTurn(chatId, {
         user: bare && prev?.user ? prev.user : said,
         toolTitle: tool.title || tool.name,
-        args: argv,
+        args: usedArgs,
         result: out,
         kind: rendered.items?.length ? 'list' : 'text',
       });
@@ -482,13 +588,16 @@ export class Agent {
       this.log?.info?.('open', `没自动打开：${JSON.stringify(asked.slice(0, 30))} · 列表 ${items.length} 条 · via=${meta.via || '-'}${meta.digest ? ' · 摘要' : ''}`);
       return null;
     }
-    const target = Agent.newestItem(items);
+    // 挑「最像」的那条，像的多条里再取最新的。
+    // 以前只按时间挑，泛词会栽：搜「验证码」同时命中 GitHub、银行、外卖平台，
+    // 最新那封可能根本不是用户在等的那家——原话里还有 steam 就该先按它过滤。
+    const target = Agent.bestItem(items, asked);
     if (!target) return null;
     const when = target.when ? `（${target.when}）` : '';
     // 只有一条时不必说「找到 1 条，先打开最近这条」——绕。
-    const lead = items.length > 1
+    const lead = (meta.note ? `${meta.note}\n` : '') + (items.length > 1
       ? `找到 ${items.length} 条，先打开最近这条${when}：`
-      : `打开这条${when}：`;
+      : `打开这条${when}：`);
     // via 标成 auto 而不是沿用「回序号」的 ref：日志和界面上要能一眼分开
     // 「网关自己替你打开了」和「你回了一个 1」。以前两者都是 ref，看起来永远是"列表"。
     return this._openListItem(chatId, target, trigger, contextToken, { lead, via: 'auto' });
