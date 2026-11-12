@@ -438,7 +438,7 @@ Node ≥ 20。
 
 工具表是这样长出来的：解析 `Usage:` / `Available Commands:` / `Flags:`，往下最多挖三代子命令（`storage` → `ls` → 参数），参数名、类型和帮助文字直接变成工具的 schema，所以**不用手写一张命令表**。风险等级同样按动词推：`ls/list/get` 只读，`rm/delete` 高危。
 
-存下来的 `config.json` 长这样：
+存下来的 `config.json` 长这样（`tools` 是数组，每个元素就是一个能被模型调用的工具）：
 
 ```json
 {
@@ -451,16 +451,25 @@ Node ≥ 20。
     "bin": "/data/connectors/nas/bin/unc",
     "args": ["--format", "json"],
     "env": { "NAS_URL": "https://192.168.1.2:9443" },
-    "tools": {
-      "storage_ls": {
+    "tools": [
+      {
+        "name": "storage_ls",
+        "title": "列出存储空间",
+        "description": "列出存储空间 / 查看磁盘",
         "command": ["storage", "ls"],
         "risk": "read",
-        "params": { "disk": { "type": "string", "required": true, "desc": "磁盘名" } }
+        "params": [
+          { "name": "disk", "flag": "--disk", "type": "string", "desc": "磁盘名" }
+        ]
       }
-    }
+    ]
   }
 }
 ```
+
+`params` 里每一项都会被翻成工具 schema 的一个字段：`type` 只有 `string`/`number`/`boolean` 三种，`flag` 是拼 argv 时用的真实选项名（`--disk`），`required: true` 的会进 `required`。最终命令是 `bin` + `prefix` + `command` + 参数 + `args`——固定的 `--format json` 这类全局开关故意排在最后，因为 pflag 允许持久参数写在子命令之后，写前面反而可能被当成子命令的一部分。
+
+环境变量的值建议在界面里填——它落在 `secrets.json`，`overrides.json` 里只留一串 `envKeys`（哪几个键有值），这样配置文件可以随便备份、截图、进 git。
 
 `cli.prefix` 是给"可执行文件本身是解释器"的场景留的：`bin=node` + `prefix=["/data/xxx/tool.js"]` → 实际跑 `node /data/xxx/tool.js <子命令>`。直接用二进制工具就留空。
 
