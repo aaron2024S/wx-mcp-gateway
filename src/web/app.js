@@ -136,20 +136,12 @@ function appCard(a) {
   </div>`;
 }
 
-// 识别方式：AI 认出来的才显示 AI，本地命中显示「本地」。
-// 用户真正想区分的就是这两种——前者花钱且有延迟，后者零成本。
+// 识别方式：现在只有一条路——AI 闭环。
+// 留这一列是因为还有两种"不需要选工具"的情况：按序号续上一条、从上一轮清单里自动打开。
 function viaCell(r) {
   if (r.via === 'llm') {
     const tip = [r.provider, r.model].filter(Boolean).join(' / ') || 'AI 识别';
     return `<span class="badge ai" title="由 AI 识别：${esc(tip)}">AI</span>`;
-  }
-  if (r.via === 'local') {
-    // 开了「总是问 AI」却回落到本地：必须显形，否则用户看到一行干净的"本地"，
-    // 永远想不到 AI 其实报错/超时了。
-    if (r.aiErr) {
-      return `<span class="badge warn" title="本该由 AI 识别，但没接上，已回落本地：${esc(r.aiErr)}">本地·降级</span>`;
-    }
-    return '<span class="badge ghost" title="本地索引命中，没调用 AI，不产生费用">本地</span>';
   }
   // 这两种都不是"没用 AI"，而是"这次不需要选工具"：对象上一轮就定好了，只是按序号取一条。
   // 以前统一显示「列表」，看着像"走了本地列表匹配"，实际上跟你回「1」是同一条路。
@@ -179,7 +171,8 @@ function fmtTok(n) {
   return String(n);
 }
 
-// token 只对 AI 调用有意义：本地命中是 0 成本，显示成「0」会被误读成「没花」。
+// token 只对 AI 调用有意义：没走 AI 的那些（按序号续上一条）显示「—」而不是「0」，
+// 否则会被误读成"没花钱但调用了模型"。
 function tokCell(r) {
   const total = typeof r.tok === 'number'
     ? r.tok
@@ -460,37 +453,6 @@ function renderWxCard() {
 
 // ---- 设置：表单 -------------------------------------------------------
 
-// 四档到底各自什么时候会真的发请求——写在旁边，省得用户猜。
-// 文案要和 src/router.js 的 needLLM / askBecauseAmbiguous 保持一致。
-const LLM_WHEN_TEXT = {
-  never: '只走本地索引。认不出来就给菜单让你挑，一次外部请求都不发。',
-  miss: '本地认得出就直接执行，认不出才问 AI。日常用这档最划算。',
-  ambiguous: '本地虽然能选出工具，但前两名分数咬得很近时也问一次 AI 确认；请求次数比上一档多。',
-  always: '每句话都先交给 AI，失败才回落本地。最灵活，但每句多花 1~3 秒，内容也会发到外部厂商。',
-};
-
-function renderLlmWhenHint() {
-  const el = $('#setLlmWhen');
-  const hint = $('#setLlmWhenHint');
-  if (!el || !hint) return;
-  const mode = el.value;
-  const s = S.data?.settings || {};
-  const hasProv = $$('#provList .tool-line').length > 0;
-
-  // 选了「问 AI」但根本问不出去——这是"我明明设了怎么还是本地"的头号原因，
-  // 提示必须显眼，不能缩在一行灰字里。
-  let warn = '';
-  if (mode !== 'never') {
-    if (s.llm_enabled !== true) warn = 'AI 兜底是关的，这一档不会生效：先把上面「启用 AI 兜底」打开。';
-    else if (!hasProv) warn = '还没有服务商，这一档不会生效：点右上角「添加服务商」。';
-  }
-  if (warn) {
-    hint.innerHTML = `<span style="color:var(--amber)">${esc(warn)}</span>`;
-  } else {
-    hint.textContent = LLM_WHEN_TEXT[mode] || LLM_WHEN_TEXT.miss;
-  }
-}
-
 function fillSettings() {
   const s = S.data?.settings;
   if (!s) return;
@@ -499,9 +461,6 @@ function fillSettings() {
   $('#setAsyncAfter').value = s.async_after;
   $('#setLogKeep').value = s.log_keep;
   $('#setConfirmRisk').value = (s.confirm_risk || []).join(',');
-  $('#setLlmEnabled').checked = s.llm_enabled === true;
-  $('#setLlmWhen').value = s.llm_when || 'miss';
-  renderLlmWhenHint();
 
   const apps = S.data.apps;
   $('#setDefaultApp').innerHTML = '<option value="">（不指定）</option>'
@@ -526,7 +485,7 @@ async function loadProviders() {
         </div>
         <span class="sp"></span>
         <button class="btn sm ghost" data-del-prov="${esc(p.id)}" data-from="${p.source}">删除</button>
-      </div>`).join('') : '<div class="hint">还没有服务商。点右上角「添加服务商」，把厂商给的接口地址和模型名填进去就行——任何 OpenAI 兼容的服务都能用，不限于预设列表。不配也能用：本地别名表已经能覆盖大部分说法。</div>';
+      </div>`).join('') : '<div class="hint">还没有服务商。点右上角「添加服务商」，把厂商给的接口地址和模型名填进去就行——任何 OpenAI 兼容的服务都能用，不限于预设列表。<b>没有模型时网关只能执行 /指令</b>，因为它靠模型来理解你说的话。</div>';
 
     $$('[data-del-prov]').forEach((b) => {
       b.onclick = async (e) => {
@@ -566,14 +525,6 @@ bindSetting('#setCallTimeout', 'call_timeout', Number);
 bindSetting('#setAsyncAfter', 'async_after', Number);
 bindSetting('#setLogKeep', 'log_keep', Number);
 bindSetting('#setDefaultApp', 'default_app', (v) => v || null);
-bindSetting('#setLlmEnabled', 'llm_enabled', (v) => v === true, (on) => {
-  // 出厂不带任何服务商，开关能点亮但后端不会真的启用——这里明说，免得以为坏了
-  if (on && !$$('#provList .tool-line').length) {
-    toast('还没有服务商，AI 兜底不会真正生效：先点「添加服务商」');
-  }
-  renderLlmWhenHint();
-});
-bindSetting('#setLlmWhen', 'llm_when', undefined, renderLlmWhenHint);
 bindSetting('#setConfirmRisk', 'confirm_risk', (v) => (v ? v.split(',') : []));
 bindSetting('#setLlmDefault', 'llm_default', (v) => v || '');
 
@@ -597,47 +548,51 @@ function explainAiError(msg) {
   return hit ? hit[1] : '';
 }
 
-// 「试一句」：把当前配置原样交给识别层跑一次（只决定、不执行），
-// 直接回答"我明明选了总是问 AI，为什么日志还是本地"。
+// 「试一句」：把当前配置原样跑一遍「检索 → 选工具」（只决定、不执行）。
+// 输出三段：检索到谁、AI 选了谁、花了多少。接了几个应用之后，
+// 这是唯一能看出「上下文里到底塞了什么」的地方。
 function probeText(r) {
   const lines = [];
-  // 模型只回话、不选工具，是"AI 明明通了却不干活"的典型形态：
-  // 常见于不支持函数调用的模型，或用户那句话本身不是指令。
-  const chatted = r.via === 'llm' && !r.tool;
-  const path = chatted ? '<b style="color:var(--amber)">AI 通了，但没选工具</b>'
-    : r.via === 'llm' ? '<b style="color:var(--green)">AI</b> 认的'
-      : r.via === 'local' ? '<b>本地</b> 命中的'
-        : '没进到执行（给了候选菜单）';
-  lines.push(`这句话走的是：${path}`);
-  if (chatted) {
-    lines.push('<span style="color:var(--amber)">模型只回了一句话，没调用任何工具——多半是它不支持函数调用，换一个支持的模型</span>');
+
+  const cands = r.candidates || [];
+  const qs = (r.queries || []).filter(Boolean);
+  lines.push(`<b>① 检索</b>：${qs.length
+    ? `模型搜了 ${qs.map((q) => `「${esc(q)}」`).join('、')}`
+    : '<span style="color:var(--amber)">没有检索（可能这句话它觉得不用工具）</span>'}`);
+  if (cands.length) {
+    lines.push(`<span class="faint" style="font-size:11px">命中 ${cands.length} 个：${cands.slice(0, 8).map((c) => `${esc(c.key)}（${c.score}）`).join(' · ')}</span>`);
+  } else if (qs.length) {
+    lines.push('<span style="color:var(--amber); font-size:11px">一个都没命中——这个词在这批应用里找不到对得上的工具</span>');
+  }
+
+  if (r.kind === 'call') {
+    lines.push(`<b>② AI 选择</b>：<span style="color:var(--green)">${esc(r.tool || r.toolKey)}</span> <span class="mono" style="font-size:11px">${esc(r.toolKey || '')}</span>`);
+    if (r.args && Object.keys(r.args).length) {
+      lines.push(`<span class="faint" style="font-size:11px">参数 ${esc(JSON.stringify(r.args).slice(0, 240))}</span>`);
+    }
+  } else if (r.kind === 'say') {
+    lines.push('<b>② AI 选择</b>：<span style="color:var(--amber)">只回了话，没调工具</span>');
+    lines.push('<span style="color:var(--amber)">多半是这个模型不支持函数调用（tool calling），换一个支持的</span>');
     if (r.reply) lines.push(`<span class="faint" style="font-size:11px">它说的是：${esc(r.reply)}</span>`);
+  } else if (r.error) {
+    const hint = explainAiError(r.error);
+    lines.push(`<b>② AI 选择</b>：<span style="color:var(--red)">没接上</span>`);
+    lines.push(`<span style="color:var(--red)">${esc(hint || r.error)}</span>`);
+    if (hint) lines.push(`<span class="faint" style="font-size:11px">原文：${esc(r.error)}</span>`);
   }
 
   if (r.state && r.state.on === false) {
-    lines.push(`<span style="color:var(--amber)">但 AI 现在根本不会生效：${esc(r.state.reason || '未启用')}</span>`);
-  }
-  if (r.tool) {
-    lines.push(`工具：${esc(r.tool)}${r.toolKey ? ` <span class="mono" style="font-size:11px">${esc(r.toolKey)}</span>` : ''}`);
+    lines.push(`<span style="color:var(--amber)">AI 现在不会生效：${esc(r.state.reason || '没有服务商')}</span>`);
   }
   if (r.provider || r.model) {
-    lines.push(`服务商：${esc([r.provider, r.model].filter(Boolean).join(' · '))}`);
+    lines.push(`<span class="faint">服务商 ${esc([r.provider, r.model].filter(Boolean).join(' · '))}</span>`);
   }
-  const bits = [`耗时 ${r.ms} ms`];
+  const bits = [`③ 耗时 ${r.ms} ms`];
   if (r.usage) {
     const t = r.usage.total ?? ((r.usage.input || 0) + (r.usage.output || 0));
     bits.push(`${t} token`);
   }
   lines.push(bits.join(' · '));
-  if (r.aiError) {
-    const hint = explainAiError(r.aiError);
-    lines.push(hint
-      ? `<span style="color:var(--red)">AI 没接上：${esc(hint)}</span><br><span class="faint" style="font-size:11px">服务商原文：${esc(r.aiError)}</span>`
-      : `<span style="color:var(--red)">AI 没接上：${esc(r.aiError)}</span>`);
-  }
-  if (r.candidates?.length) {
-    lines.push(`候选：${esc(r.candidates.join(' / '))}`);
-  }
   return lines.join('<br>');
 }
 
@@ -646,11 +601,13 @@ function bindProbe() {
   const out = $('#probeOut');
   if (!btn || !out) return;
   btn.onclick = async () => {
+    const input = $('#probeText');
+    const text = (input?.value || '').trim();
     btn.disabled = true;
     out.style.display = 'block';
-    out.innerHTML = '正在试…（走 AI 的话要等一两秒）';
+    out.innerHTML = '正在试…（要等一两秒）';
     try {
-      const r = await api('/api/llm/probe', { method: 'POST', body: { text: '有几封未读邮件' } });
+      const r = await api('/api/llm/probe', { method: 'POST', body: { text } });
       out.innerHTML = probeText(r);
     } catch (e) {
       out.innerHTML = `<span style="color:var(--red)">${esc(e.message)}</span>`;
@@ -662,7 +619,30 @@ bindProbe();
 
 // ---- 添加/编辑应用向导 ------------------------------------------------
 
-let WZ = { step: 1, editId: null, tested: false, tools: [], picked: {}, hasFull: false };
+let WZ = { step: 1, editId: null, tested: false, tools: [], picked: {}, hasFull: false, transport: 'mcp-http', specs: [] };
+
+function applyTransport() {
+  const cli = WZ.transport === 'cli';
+  $('#wzMcpFields').classList.toggle('hidden', cli);
+  $('#wzCliFields').classList.toggle('hidden', !cli);
+  $$('#wzTransport .seg-btn').forEach((b) => b.classList.toggle('on', b.dataset.t === WZ.transport));
+  $('#testBtn').textContent = cli ? '探测工具' : '测试连接';
+}
+
+$$('#wzTransport .seg-btn').forEach((b) => {
+  b.onclick = () => {
+    if (WZ.transport === b.dataset.t) return;
+    WZ.transport = b.dataset.t;
+    // 换了接入方式，之前那次测试的结论作废：MCP 通不代表这个 CLI 也装好了
+    WZ.tested = false;
+    WZ.tools = [];
+    WZ.specs = [];
+    WZ.picked = {};
+    $('#testResult').classList.remove('on', 'ok', 'bad');
+    applyTransport();
+    setStep(WZ.step);
+  };
+});
 
 function setStep(n) {
   WZ.step = n;
@@ -676,8 +656,8 @@ function setStep(n) {
   $('#wzNext').disabled = n === 1 ? !WZ.tested : !WZ.tools.length;
 }
 
-function openWizard(appId) {
-  WZ = { step: 1, editId: appId, tested: false, tools: [], picked: {}, hasFull: false };
+async function openWizard(appId) {
+  WZ = { step: 1, editId: appId, tested: false, tools: [], picked: {}, hasFull: false, transport: 'mcp-http', specs: [] };
 
   const app = appId ? S.data.apps.find((a) => a.id === appId) : null;
   $('#wzLabel').value = app?.label || '';
@@ -687,13 +667,27 @@ function openWizard(appId) {
   $('#wzUrl').value = app?.url || '';
   $('#wzToken').value = '';
   $('#wzToken').placeholder = app?.hasToken ? '已设置，留空表示不修改' : '留空表示不需要鉴权';
+  // CLI 字段回填。环境变量只回键名——值在服务端 secrets.json 里，界面读不到。
+  WZ.transport = app?.transport === 'cli' ? 'cli' : 'mcp-http';
+  $('#wzCliBin').value = app?.cli?.bin || '';
+  $('#wzCliPrefix').value = (app?.cli?.prefix || []).join(' ');
+  $('#wzCliArgs').value = (app?.cli?.args || []).join(' ');
+  $('#wzCliEnv').value = (app?.cli?.envKeys || []).map((k) => `${k}=`).join('\n');
+  $('#wzCliEnv').placeholder = app?.cli?.hasEnv
+    ? '已设置以下键（值不回显）。留空 = 不修改；只写 KEY 表示沿用原值'
+    : 'NAS_URL=https://192.168.1.2:9443\nNAS_TOKEN=ugpoa_v1.xxx';
+  $('#wzCliUrl').value = '';
+  $('#wzCliSha').value = '';
+  $('#wzCliInstallOut').textContent = '';
+  $('#wzCliGeneric').checked = app?.cli?.generic === true;
+  applyTransport();
   const ar = app?.allow_risk || ['read'];
   $('#wzRiskRead').checked = ar.includes('read');
   $('#wzRiskWrite').checked = ar.includes('write');
   $('#wzRiskHigh').checked = ar.includes('high');
   $('#testResult').classList.remove('on');
-  $('#testBtn').textContent = '测试连接';
   $('#testBtn').disabled = false;
+  applyTransport();
 
   // 编辑时直接进表单：地址和端口都是现成的，不用重走一遍
   if (app) {
@@ -711,9 +705,22 @@ function openWizard(appId) {
       WZ.picked[t.name] = avail.length ? t.enabled !== false : (inc.length ? inc.includes(t.name) : true);
     }
     buildTools();
+    // CLI 的完整工具表不在 /api/state 里（太大，会被轮询带走），单独取一次。
+    // 少了它保存时会把 command/params 写丢，接进来就成了跑不动的空壳。
+    if (WZ.transport === 'cli') await loadCliSpecs(app.id);
   }
   setStep(1);
   $('#appModal').classList.remove('hidden');
+}
+
+async function loadCliSpecs(id) {
+  try {
+    const r = await api(`/api/apps/${encodeURIComponent(id)}/cli-specs`);
+    WZ.specs = r?.tools || [];
+    $('#wzCliGeneric').checked = r?.generic === true;
+  } catch {
+    WZ.specs = [];
+  }
 }
 
 function closeWizard() {
@@ -721,9 +728,11 @@ function closeWizard() {
 }
 
 function buildTools() {
-  // enabled 只有编辑时才有：服务端报的是「现在是否启用」，用来标出后来新增/被关掉的
+  // 勾选结果是白名单：没勾的工具连检索都搜不到，模型永远不会看见它。
+  // 所以这里的措辞不能是"少勾点省 token"——检索一次只递 8 个候选，工具多不会撑爆上下文，
+  // 真正想限制的是"能做哪些事"，那件事由 allow_risk 管更合适。
   const off = WZ.tools.filter((t) => t.enabled === false).length;
-  const hint = `发现 ${WZ.tools.length} 个工具${off ? `，其中 ${off} 个还没启用（应用侧新加的多半在这里）` : ''}。只勾你日常真的会用的——放太多会稀释识别准确率。`;
+  const hint = `发现 ${WZ.tools.length} 个工具${off ? `，其中 ${off} 个还没启用（应用侧新加的多半在这里）` : ''}。勾上的才算能用的——没勾的连检索都搜不到。`;
   $('#toolHint').textContent = hint;
 
   const order = { read: 0, write: 1, high: 2 };
@@ -757,69 +766,182 @@ $('#addAppBtn').onclick = () => openWizard(null);
 $('#wzCancel').onclick = closeWizard;
 $('#wzPrev').onclick = () => setStep(Math.max(1, WZ.step - 1));
 
+// 一行一个 KEY=VALUE。只写 KEY（不带等号）表示「沿用已存的值」——
+// 编辑时界面拿不到原值，让用户重敲一遍令牌是不现实的。
+function cliEnvInput() {
+  const env = {};
+  const keys = [];
+  for (const raw of $('#wzCliEnv').value.split('\n')) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#')) continue;
+    const i = line.indexOf('=');
+    const k = (i < 0 ? line : line.slice(0, i)).trim();
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) continue;
+    if (!keys.includes(k)) keys.push(k);
+    if (i >= 0) env[k] = line.slice(i + 1);
+  }
+  return { env, keys };
+}
+
 function draftApp() {
   const risks = [];
   if ($('#wzRiskRead').checked) risks.push('read');
   if ($('#wzRiskWrite').checked) risks.push('write');
   if ($('#wzRiskHigh').checked) risks.push('high');
-  return {
+  const base = {
     id: $('#wzId').value.trim() || $('#wzLabel').value.trim().toLowerCase().replace(/\s+/g, '-'),
     label: $('#wzLabel').value.trim(),
     aliases: $('#wzAlias').value.split(/[·,，、\s]+/).map((s) => s.trim()).filter(Boolean),
-    url: $('#wzUrl').value.trim(),
     allow_risk: risks.length ? risks : ['read'],
+    transport: WZ.transport,
   };
+  if (WZ.transport === 'cli') {
+    const { env, keys } = cliEnvInput();
+    return {
+      ...base,
+      cli: {
+        bin: $('#wzCliBin').value.trim(),
+        prefix: $('#wzCliPrefix').value.split(/\s+/).map((s) => s.trim()).filter(Boolean),
+        args: $('#wzCliArgs').value.split(/\s+/).map((s) => s.trim()).filter(Boolean),
+        env,
+        envKeys: keys,
+        generic: $('#wzCliGeneric').checked,
+        // 带 command/params 的完整工具表：只存界面上的 name/title 会让 callTool
+        // 拼不出命令行，接进来一个跑不动的应用。
+        tools: WZ.specs,
+      },
+    };
+  }
+  return { ...base, url: $('#wzUrl').value.trim() };
+}
+
+// 探测出来的工具表 → 勾选列表用的瘦身视图
+function slimTools(specs) {
+  return specs.map((s) => ({
+    name: s.name,
+    title: s.title || '',
+    description: s.description || '',
+    risk: s.risk || 'read',
+  }));
 }
 
 $('#testBtn').onclick = async () => {
   const btn = $('#testBtn');
   const box = $('#testResult');
   const draft = draftApp();
-  if (!draft.url) { toast('先填端点地址'); return; }
-  if (!/^https?:\/\//.test(draft.url)) { toast('地址要以 http:// 或 https:// 开头'); return; }
+  const isCli = draft.transport === 'cli';
+
+  if (isCli) {
+    if (!draft.cli.bin) { toast('先填可执行文件路径（容器内的）'); return; }
+  } else {
+    if (!draft.url) { toast('先填端点地址'); return; }
+    if (!/^https?:\/\//.test(draft.url)) { toast('地址要以 http:// 或 https:// 开头'); return; }
+  }
 
   btn.disabled = true;
-  btn.textContent = '测试中…';
+  btn.textContent = isCli ? '探测中…' : '测试中…';
   box.classList.remove('on', 'ok', 'bad');
 
   try {
-    const r = await api('/api/apps/test', { method: 'POST', body: { ...draft, token: $('#wzToken').value } });
-    box.classList.add('on', r.ok ? 'ok' : 'bad');
-    if (r.ok) {
-      WZ.tested = true;
-      WZ.hasFull = true;      // r.tools 是服务端此刻的全量清单
-      WZ.tools = r.tools;
+    if (isCli) {
+      // CLI 不走 MCP 握手：真跑一遍 --help 树，把工具表抠出来。
+      // unc 有 108 个子命令，这一步要 7~8 秒，所以按钮文案写「探测」而不是「测试」。
+      const r = await api('/api/cli/probe', {
+        method: 'POST',
+        body: {
+          id: draft.id,
+          bin: draft.cli.bin,
+          cli: { prefix: draft.cli.prefix, args: draft.cli.args },
+          env: draft.cli.env,
+        },
+      });
+      const tools = r.tools || [];
+      WZ.specs = tools;
+      WZ.hasFull = true;
+      WZ.tested = true;       // 探测成功即可往下走，工具少也让它保存
+      WZ.tools = slimTools(tools);
       WZ.picked = {};
-      for (const t of r.tools) WZ.picked[t.name] = t.risk === 'read';   // 只读默认勾，其余手动
-      box.innerHTML = `<p class="tr-title ok">连接成功</p>
-        <div class="tr-rows">
-          <span>协议版本</span><span class="mono">${esc(r.protocolVersion || '—')}</span>
-          <span>服务端</span><span>${esc(r.serverInfo?.name || '—')} ${esc(r.serverInfo?.version || '')}</span>
-          <span>发现工具</span><span>${r.tools.length} 个</span>
-          <span>往返耗时</span><span>${r.ms} ms</span>
-        </div>`;
-      btn.textContent = '重新测试';
+      for (const t of WZ.tools) WZ.picked[t.name] = t.risk === 'read';
+
+      box.classList.add('on', tools.length ? 'ok' : 'bad');
+      if (tools.length) {
+        const by = { read: 0, write: 0, high: 0 };
+        for (const t of tools) by[t.risk] = (by[t.risk] || 0) + 1;
+        box.innerHTML = `<p class="tr-title ok">探测成功</p>
+          <div class="tr-rows">
+            <span>子命令</span><span>${tools.length} 个（只读 ${by.read} / 写入 ${by.write} / 高危 ${by.high}）</span>
+            <span>耗时</span><span>${r.ms} ms</span>
+            <span>可执行</span><span class="mono">${esc(draft.cli.bin)}</span>
+            ${r.root ? `<span>工具说明</span><span>${esc(String(r.root).slice(0, 120))}</span>` : ''}
+          </div>
+          ${(r.warnings || []).length ? `<div class="tr-rows" style="margin-top:8px"><span>跳过</span><span>${esc(r.warnings.slice(0, 3).join('；'))}</span></div>` : ''}`;
+      } else {
+        box.innerHTML = `<p class="tr-title bad">没探测到子命令</p>
+          <div style="color:var(--red)">${esc(r.message || '帮助信息读不出来')}</div>
+          <div class="tr-rows"><span>怎么办</span><span>确认路径是容器内的路径、程序能执行；如果这个工具不是 cobra 那套帮助格式，勾上「允许执行任意子命令」让它兜底。</span></div>`;
+      }
     } else {
-      WZ.tested = false;
-      box.innerHTML = `<p class="tr-title bad">连接失败</p>
-        <div style="color:var(--red); margin-bottom:8px">${esc(r.message)}</div>
-        ${r.hint ? `<div class="tr-rows"><span>怎么办</span><span>${esc(r.hint)}</span></div>` : ''}`;
-      btn.textContent = '重新测试';
+      const r = await api('/api/apps/test', { method: 'POST', body: { ...draft, token: $('#wzToken').value } });
+      box.classList.add('on', r.ok ? 'ok' : 'bad');
+      if (r.ok) {
+        WZ.tested = true;
+        WZ.hasFull = true;      // r.tools 是服务端此刻的全量清单
+        WZ.tools = r.tools;
+        WZ.specs = [];
+        WZ.picked = {};
+        for (const t of r.tools) WZ.picked[t.name] = t.risk === 'read';   // 只读默认勾，其余手动
+        box.innerHTML = `<p class="tr-title ok">连接成功</p>
+          <div class="tr-rows">
+            <span>协议版本</span><span class="mono">${esc(r.protocolVersion || '—')}</span>
+            <span>服务端</span><span>${esc(r.serverInfo?.name || '—')} ${esc(r.serverInfo?.version || '')}</span>
+            <span>发现工具</span><span>${r.tools.length} 个</span>
+            <span>往返耗时</span><span>${r.ms} ms</span>
+          </div>`;
+      } else {
+        WZ.tested = false;
+        box.innerHTML = `<p class="tr-title bad">连接失败</p>
+          <div style="color:var(--red); margin-bottom:8px">${esc(r.message)}</div>
+          ${r.hint ? `<div class="tr-rows"><span>怎么办</span><span>${esc(r.hint)}</span></div>` : ''}`;
+      }
     }
     box.scrollIntoView({ block: 'nearest' });
   } catch (e) {
     box.classList.add('on', 'bad');
-    box.innerHTML = `<p class="tr-title bad">测试没跑成</p><div style="color:var(--red)">${esc(e.message)}</div>`;
-    btn.textContent = '重新测试';
+    box.innerHTML = `<p class="tr-title bad">没跑成</p><div style="color:var(--red)">${esc(e.message)}</div>`;
   } finally {
     btn.disabled = false;
+    btn.textContent = isCli ? '重新探测' : '重新测试';
     setStep(WZ.step);   // 只刷新按钮可用状态，别顺带跳步
+  }
+};
+
+// 下载安装：网关自己下载 + 校验 sha256 + 解包，不执行远程脚本
+$('#wzCliInstall').onclick = async () => {
+  const out = $('#wzCliInstallOut');
+  const url = $('#wzCliUrl').value.trim();
+  const id = $('#wzId').value.trim() || $('#wzLabel').value.trim().toLowerCase().replace(/\s+/g, '-');
+  if (!url) { toast('先填下载地址'); return; }
+  if (!id) { toast('先填标识（id），它决定装到哪个目录'); return; }
+  const btn = $('#wzCliInstall');
+  btn.disabled = true;
+  out.textContent = '下载中…（大文件要一会儿）';
+  try {
+    const r = await api('/api/cli/install', {
+      method: 'POST',
+      body: { id, url, sha256: $('#wzCliSha').value.trim() || undefined },
+    });
+    $('#wzCliBin').value = r.bin;
+    out.textContent = `已装好：${r.bin}（${(r.bytes / 1e6).toFixed(1)} MB，${r.files} 个文件）`;
+  } catch (e) {
+    out.textContent = `没装成：${e.message}`;
+  } finally {
+    btn.disabled = false;
   }
 };
 
 $('#wzNext').onclick = async () => {
   if (WZ.step === 1) {
-    if (!WZ.tested) { toast('先点「测试连接」，通过了才能继续'); return; }
+    if (!WZ.tested) { toast(WZ.transport === 'cli' ? '先点「探测工具」，探测出子命令才能继续' : '先点「测试连接」，通过了才能继续'); return; }
     buildTools();
     setStep(2);
     return;
@@ -828,12 +950,22 @@ $('#wzNext').onclick = async () => {
   // 保存
   const draft = draftApp();
   const include = Object.entries(WZ.picked).filter(([, v]) => v).map(([k]) => k);
-  if (!include.length) { toast('至少勾一个工具'); return; }
+  // CLI 只带勾上的那几条：工具表就是执行依据，留着没勾的等于给了模型没打算给的能力
+  if (draft.transport === 'cli') {
+    draft.cli.tools = WZ.specs.filter((s) => WZ.picked[s.name]);
+    if (!draft.cli.tools.length && !draft.cli.generic) { toast('至少勾一个工具，或打开兜底开关'); return; }
+  } else if (!include.length) {
+    toast('至少勾一个工具');
+    return;
+  }
   if (!draft.id) { toast('缺少标识'); return; }
 
   // 全勾就等于不设白名单：include 留空 = 全放开，应用侧以后新增的工具
   // 不用回来改配置就能直接生效。只有真的想限制时才写死名单。
-  const whitelist = (WZ.hasFull && include.length === WZ.tools.length) ? [] : include;
+  // CLI 没有「应用侧新增」这回事（工具表是本地探出来的），所以它不带 include。
+  const whitelist = draft.transport === 'cli'
+    ? null
+    : ((WZ.hasFull && include.length === WZ.tools.length) ? [] : include);
 
   const btn = $('#wzNext');
   btn.disabled = true;
@@ -841,7 +973,11 @@ $('#wzNext').onclick = async () => {
   try {
     const r = await api('/api/apps', {
       method: 'POST',
-      body: { ...draft, token: $('#wzToken').value, tools: { include: whitelist } },
+      body: {
+        ...draft,
+        token: $('#wzToken').value,
+        tools: whitelist === null ? {} : { include: whitelist },
+      },
     });
     closeWizard();
     await refreshAll();

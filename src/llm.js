@@ -319,7 +319,7 @@ function candidates(cfg, preferred) {
  * @returns {{tool:string|null, args:object, via:'llm', provider:string, model:string, ms:number, usage:object|null, text:string}}
  */
 export async function routeWithLLM({ text, tools, config, providerId, history }) {
-  if (!config.llm?.enabled) throw new LlmError('config', 'AI 路由未启用');
+  if (!config.llm?.enabled) throw new LlmError('config', '还没有配置 AI 模型');
   if (!tools.length) throw new LlmError('config', '没有可用的工具');
 
   const list = candidates(config, providerId);
@@ -423,19 +423,32 @@ export function listProviders(config) {
 // 2026-11-10 实测的差距：问「上次坐火车去哪」，单轮只能拿到 0 命中就认输；
 // 而多轮里有 3 次机会换词（火车→12306），换到就查到了。这不是模型聪明与否，
 // 是它能不能看见"上一次尝试的结果"。
-const AGENT_PROMPT = `你在微信里帮用户查东西。你有一个工具箱，可以连续调用多次来把问题查清楚。
+// 网关版的「目录 + 按需加载」。
+//
+// 为什么不能把工具全塞进来：一个应用 22 个工具就是 4.5k token（实测），接三个
+// 应用常驻 20k，而闭环每轮都要带一遍。WorkBuddy 挂 649 个连接器不慢，是因为
+// 常驻的只有「名字 + 一行描述」，schema 到用的时候才取。
+//
+// 这里的做法是同一个思路，但检索器是本地那个中文分词 + idf 的匹配器，
+// 比关键词搜索准，而且**不预筛**——模型自己决定搜什么、搜几次。
+const AGENT_PROMPT = `你在微信里帮用户查东西、办事。你有一批工具，但**没有全部列出来**：
+下面只有每个应用的目录，真正的工具要先用 search_tools 取出来才能调用。
 
 规则：
-1. 每一轮只调一个工具；需要更多信息就继续调，别急着下结论。
-2. 用户点名的范围必须原样带上：指明哪个账号/邮箱、哪个文件夹、要几条，就照填，不许省略、不许改默认值。
-3. 但「检索词」不是范围，是你的判断：用户说「火车」你就该想到搜 12306，「游戏订单」想到 Steam，
+1. 用户要做什么，先在目录里找对应的应用；要用里面的工具，先调 search_tools
+   （query 写用户的原话或关键词，例如「硬盘温度」「未读邮件」），拿到工具后再调它。
+   不要凭空编工具名——没在清单里的名字调用会失败。
+2. 每一轮只调一个工具；需要更多信息就继续调，别急着下结论。
+3. 用户点名的范围必须原样带上：指明哪个账号/邮箱、哪个文件夹、要几条，就照填，不许省略、不许改默认值。
+4. 但「检索词」不是范围，是你的判断：用户说「火车」你就该想到搜 12306，「游戏订单」想到 Steam，
    「航班」想到行程单/航司名。可以按常识替换、可以多试几个词，换词之后在回答里说明你换了什么。
-4. 搜不到不等于没有。先换词再搜，最多换两次；仍然没有，才说没查到，并说明试过哪些词。
-5. 答案必须能指出来源：几封、哪一封、什么时间。指不出来就不许答——不许把「看到了清单」说成「看过了正文」，
-   不许编造邮件里没有的金额、日期、单号。
-6. 只有一种情况可以停：你已经拿到了足以回答用户这句话的信息。
-7. 用中文回答，微信里看，3 到 6 句，不要 markdown、不要列表符号、不要分点编号。
-8. 工具返回里出现 hint / note 时，按其中的指引继续，不要忽略。
+5. 搜不到不等于没有。先换词再搜，最多换两次；仍然没有，才说没查到，并说明试过哪些词。
+6. 答案必须能指出来源：几封、哪一封、什么时间、哪台设备。指不出来就不许答——不许把「看到了清单」
+   说成「看过了正文」，不许编造没出现过的金额、日期、单号、容量。
+7. 只有一种情况可以停：你已经拿到了足以回答用户这句话的信息。
+8. 用中文回答，微信里看，3 到 6 句，不要 markdown、不要列表符号、不要分点编号。
+9. 工具返回里出现 hint / note 时，按其中的指引继续，不要忽略。
+10. 权限不足、命令不存在这类错误，如实告诉用户缺什么，不要反复重试同一个调用。
 
 现在开始。用户这句话可能是在接着上一轮说（「那个」「再详细点」），有历史就接着上一轮的对象做。`;
 
@@ -516,25 +529,34 @@ const LOOP_ADAPTERS = {
  * 多轮工具循环。
  * @param {object} o
  * @param {string} o.text      用户这句话
- * @param {Array}  o.tools     工具清单（registry.llmTools 的产物）
+ * @param {Array}  o.tools     常驻工具（现在是 [search_tools] 一个）
+ * @param {string} [o.catalog] 可用应用目录，拼进系统提示词
+ * @param {(q:string,o?:object)=>{results:Array<{tool:object,score:number}>}} [o.search]
+ *        按需检索：给一句话，返回候选工具（完整 schema）。模型自己决定搜什么。
  * @param {object} o.config    完整配置
  * @param {Array}  o.history   最近几轮对话
  * @param {(name:string,args:object)=>Promise<{ok:boolean,text:string,halt?:object,sig?:string}>} o.execute
- * @param {number} o.maxRounds 最多几轮（默认 5）
+ * @param {number} o.maxRounds 最多几轮（默认 6）
  * @param {number} o.maxMs     总时间预算
  */
-export async function agentLoop({ text, tools, config, history = [], execute, maxRounds = 5, maxMs = 50000, providerId = null }) {
+export async function agentLoop({
+  text, tools, config, history = [], execute, search, catalog = '', maxRounds = 6, maxMs = 50000, providerId = null,
+}) {
   const list = candidates(config, providerId);
   if (!list.length) throw new LlmError('config', '没有可用的 AI 服务商');
-  if (!tools?.length) throw new LlmError('config', '当前没有可用的工具');
+  if (!tools?.length && !search) throw new LlmError('config', '当前没有可用的工具');
   const p = list[0];
   const timeoutMs = Math.max(5000, (config.llm?.timeout || 15) * 1000);
   const started = Date.now();
   const adapter = LOOP_ADAPTERS[p.type] || LOOP_ADAPTERS.openai;
-  const { wire, back } = prepareTools(tools);
-  const wireOf = new Map(wire.map((w) => [back.get(w.name), w.name]));
 
-  const messages = [{ role: 'system', content: AGENT_PROMPT }];
+  // 已经取回来的工具。检索一次就把 schema 挂上去，后面每一轮都能直接用。
+  const loaded = new Map();
+
+  const messages = [{
+    role: 'system',
+    content: catalog ? `${AGENT_PROMPT}\n\n可用应用（只有目录，工具要检索）：\n${catalog}` : AGENT_PROMPT,
+  }];
   for (const m of historyMessages(history)) messages.push(m);
   messages.push({ role: 'user', content: text });
 
@@ -556,6 +578,12 @@ export async function agentLoop({ text, tools, config, history = [], execute, ma
     if (Date.now() - started > maxMs) {
       return { text: '', trace, usage, rounds, stop: 'timeout', provider: p.id, model: p.model };
     }
+    // 每轮重新编一次名字，但顺序固定（常驻在前、取回的按插入序），
+    // 所以同一个工具在各轮里拿到的是同一个 wire name，模型不会看到名字漂移。
+    const all = [...(tools || []), ...loaded.values()];
+    const { wire, back } = prepareTools(all);
+    const wireOf = new Map(wire.map((w) => [back.get(w.name), w.name]));
+
     const s = await adapter.step({ messages, wire, p, timeoutMs, maxTokens: Number(config.llm?.max_tokens) || 900 });
     rounds = round;
     addUsage(s.usage);
@@ -566,14 +594,44 @@ export async function agentLoop({ text, tools, config, history = [], execute, ma
     }
 
     const realName = unwireName(back, s.tool);
-    const r = await execute(realName, s.args || {});
+    const callArgs = s.args || {};
+
+    // 检索这一跳不走执行层：它是网关自己的能力，不属于任何一个应用。
+    if (realName === 'search_tools' && search) {
+      const q = String(callArgs.query ?? '').trim();
+      const app = callArgs.app ? String(callArgs.app) : undefined;
+      let found = [];
+      try {
+        found = search(q, { appId: app })?.results || [];
+      } catch { /* 检索失败就当没命中，别把整轮打死 */ }
+      let payload;
+      if (!found.length) {
+        payload = `没有找到和「${q || '（空）'}」有关的工具。换一个说法再检索一次；如果确实没有这个能力，就直接告诉用户做不到。`;
+      } else {
+        for (const it of found) {
+          if (!loaded.has(it.tool.key)) loaded.set(it.tool.key, toLlmTool(it.tool));
+        }
+        payload = [
+          `检索「${q || '（空）'}」命中 ${found.length} 个工具，现在都可以调用了：`,
+          ...found.map((it) => `· ${it.tool.key} — ${oneLine(it.tool)}`),
+          '（用上面的完整名字调用，参数看各自的 schema）',
+        ].join('\n');
+      }
+      trace.push({ tool: 'search_tools', args: { query: q, app: app || '' }, ok: true, text: payload });
+      s.wireName = wireOf.get('search_tools') || s.tool;
+      adapter.pushCall(messages, s);
+      adapter.pushResult(messages, s, payload);
+      continue;
+    }
+
+    const r = await execute(realName, callArgs);
     if (r?.halt) {
       // 写操作/高危操作不在循环里自动执行，交回上层的确认流程
       return { text: '', trace, usage, rounds, stop: 'halt', halted: r.halt, provider: p.id, model: p.model };
     }
 
     // 无进展检测：同一工具同一参数连续两次，说明它在原地打转，再多轮也是白烧钱
-    const sig = r?.sig || `${realName}|${JSON.stringify(s.args || {})}`;
+    const sig = r?.sig || `${realName}|${JSON.stringify(callArgs)}`;
     if (sig === lastSig) {
       same += 1;
       if (same >= 2) {
@@ -587,7 +645,7 @@ export async function agentLoop({ text, tools, config, history = [], execute, ma
     // trace 里存「给用户看的」版本：执行层返回 visible 时以它为准。
     // 模型看到的那份会带 uid/account/folder 这类定位参数（不给 uid 它只能瞎猜），
     // 而 trace 会在「没查完」时被原样发给用户，内部参数一个都不能露出去。
-    trace.push({ tool: realName, args: s.args || {}, ok: r?.ok !== false, text: String((r?.visible ?? r?.text) || '') });
+    trace.push({ tool: realName, args: callArgs, ok: r?.ok !== false, text: String((r?.visible ?? r?.text) || '') });
     s.wireName = wireOf.get(realName) || s.tool;
     adapter.pushCall(messages, s);
     adapter.pushResult(messages, s, String(r?.text || '（没有内容）'));
@@ -595,3 +653,33 @@ export async function agentLoop({ text, tools, config, history = [], execute, ma
 
   return { text: '', trace, usage, rounds, stop: 'max-rounds', provider: p.id, model: p.model };
 }
+
+// registry 里那条工具 → 喂给模型的样子。截 600 是历史经验：应用作者常把
+// 最要紧的一句（「指名了邮箱就必须传 account」）放在描述末尾，剪太短正好剪掉。
+function toLlmTool(t) {
+  const desc = [t.title, t.description].filter(Boolean).join('：');
+  return {
+    name: t.key,
+    description: desc.length > 600 ? `${desc.slice(0, 600)}…` : desc,
+    inputSchema: t.inputSchema,
+  };
+}
+
+function oneLine(t) {
+  const s = String(t.title || t.description || '').replace(/\s+/g, ' ').trim();
+  return s.length > 80 ? `${s.slice(0, 80)}…` : s;
+}
+
+// 检索工具的声明。它和真工具长得一样，模型不需要知道这是个"网关内建"的东西。
+export const SEARCH_TOOL = {
+  name: 'search_tools',
+  description: '按一句话检索可用的工具。想用的能力不在当前清单里时，先用它搜（query 用用户的原话或关键词）。返回的工具会立刻变得可调用。',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      query: { type: 'string', description: '要做什么，中文原话即可，例如「硬盘温度」「未读邮件」「重启容器」' },
+      app: { type: 'string', description: '只在这个应用里找（应用 id），一般不用填' },
+    },
+    required: ['query'],
+  },
+};

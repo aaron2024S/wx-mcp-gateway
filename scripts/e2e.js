@@ -14,6 +14,7 @@
 //   ⑥ -14 转 needs_relogin，且清掉落盘凭据
 
 import http from 'node:http';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -251,59 +252,122 @@ function mockIlink() {
 }
 
 // ---- 假 AI 端点（OpenAI 兼容）----------------------------------------
-// 只为了让「via=llm + token 用量」这条路径能被真正跑一遍：
-// 不接真 API，也就不会因为没 key 而让这一段永远没人测。
-
-function mockLlm(opts = {}) {
+// 网关现在只有一条路：模型自己检索工具 → 选一个 → 看结果 → 再决定。
+// 所以假端点也不能只会"挑一个工具"，它得按这条路走完，否则测的是一条不存在的链路。
+//
+// 行为由 ctl 控制（同一个 server 全程复用，各用例改 ctl 即可）：
+//   ctl.want    第二轮去调哪个工具（名字片段，不填就跟默认的那条）
+//   ctl.search  检索词；函数则拿用户原话算，默认就用用户原话
+//   ctl.args    调工具时的参数（函数则拿上下文算）
+//   ctl.answer  最终回答；不填就把最后一次工具结果原样转述（够验渲染了）
+//   ctl.text    不带 tools 的请求（摘要那种）回什么
+function mockLlm(ctl = {}) {
   const seen = [];
+  const say = (res, payload) => {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(payload));
+  };
+
   const server = http.createServer((req, res) => {
     let buf = '';
     req.on('data', (c) => { buf += c; });
     req.on('end', () => {
       const body = JSON.parse(buf || '{}');
       seen.push({ path: req.url, body });
+
       // 不带 tools = 纯生成请求（「把这段内容说成人话」那种）。真实端点这时
       // 会回 content，不会回 tool_calls——假端点也得照这个行为来，否则摘要那条
       // 路径在测试里永远是"AI 没给出内容"，等于没测。
       if (!Array.isArray(body.tools) || !body.tools.length) {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({
-          choices: [{ message: { role: 'assistant', content: opts.text || '要点：这是一封旅游合同签订成功的通知，10 月 1 日出发，出发前 3 天要确认集合时间。' } }],
+        return say(res, {
+          choices: [{ message: { role: 'assistant', content: ctl.text || '要点：这是一封旅游合同签订成功的通知，10 月 1 日出发，出发前 3 天要确认集合时间。' } }],
           usage: { prompt_tokens: 500, completion_tokens: 60, total_tokens: 560 },
-        }));
-        return;
+        });
       }
+
       // 像 DeepSeek / OpenAI 那样校验 function name 的字符集。
       // 名字转义一旦坏掉（我们内部用的是「应用.工具」，点号不合法），
       // 这里立刻 400 —— 而不是等用户点「试一句」才发现 AI 根本没通。
-      const names = (body.tools || []).map((t) => t.function?.name).filter(Boolean);
+      const names = body.tools.map((t) => t.function?.name).filter(Boolean);
       const bad = names.find((n) => !/^[a-zA-Z0-9_-]{1,64}$/.test(n));
       if (bad) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: { message: `Invalid 'tools[0].function.name': ${bad}` } }));
         return;
       }
-      // 模型只会从发给它的清单里挑，且报回来的是转义后的名字
-      const want = opts.pick ? opts.pick(body) : null;
-      const pick = want
-        ? (names.find((n) => n === want || n.endsWith(`_${want}`)) || want)
-        : (names.find((n) => /list_messages/.test(n)) || names[0] || 'list_messages');
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({
-        choices: [{
-          message: {
-            role: 'assistant',
-            content: null,
-            tool_calls: [{ id: 'c1', type: 'function', function: { name: pick, arguments: opts.args || '{}' } }],
-          },
-        }],
+
+      // 只看**这一轮**：历史里只有 user/assistant 文本，不带 tool 消息，
+      // 所以「最后一句用户话之后的 tool 条数」就是本轮走到第几步。
+      const msgs = body.messages || [];
+      let lastUser = -1;
+      msgs.forEach((m, i) => { if (m.role === 'user') lastUser = i; });
+      const toolSteps = msgs.slice(lastUser + 1).filter((m) => m.role === 'tool');
+      const userText = String(msgs[lastUser]?.content || '');
+      if (process.env.E2E_DEBUG) {
+        console.error('[mock]', JSON.stringify({ user: userText.slice(0, 16), toolSteps: toolSteps.length, names }));
+      }
+      const answer = () => {
+        const last = toolSteps.at(-1)?.content || '';
+        return ctl.answer != null ? ctl.answer : String(last);
+      };
+
+      const done = (text) => say(res, {
+        choices: [{ message: { role: 'assistant', content: text }, finish_reason: 'stop' }],
         usage: { prompt_tokens: 812, completion_tokens: 43, total_tokens: 855 },
-      }));
+      });
+
+      // ① 还没检索过：像真模型一样先问"有哪些工具"
+      if (toolSteps.length === 0) {
+        if (ctl.noSearch) {
+          // 少数模型不上来先搜，也可能直接用已经常驻的工具；给一条等价路径
+        } else {
+          const q = typeof ctl.search === 'function' ? ctl.search(userText) : (ctl.search || userText);
+          return say(res, {
+            choices: [{
+              message: {
+                role: 'assistant',
+                content: null,
+                tool_calls: [{ id: 's1', type: 'function', function: { name: 'search_tools', arguments: JSON.stringify({ query: q }) } }],
+              },
+            }],
+            usage: { prompt_tokens: 812, completion_tokens: 43, total_tokens: 855 },
+          });
+        }
+      }
+
+      // ② 检索完了：挑一个真工具调
+      const usable = names.filter((n) => n !== 'search_tools');
+      const steps = ctl.noSearch ? toolSteps.length : toolSteps.length - 1;
+      if (steps === 0 && usable.length) {
+        const want = ctl.want;
+        const hit = want
+          ? (usable.find((n) => (want instanceof RegExp ? want.test(n) : n.includes(want))) || null)
+          : (usable.find((n) => /list_messages/.test(n)) || usable[0]);
+        if (hit) {
+          const args = typeof ctl.args === 'function'
+            ? ctl.args({ userText, hits: toolSteps.at(-1)?.content || '', names })
+            : (ctl.args || {});
+          return say(res, {
+            choices: [{
+              message: {
+                role: 'assistant',
+                content: null,
+                tool_calls: [{ id: 'c1', type: 'function', function: { name: hit, arguments: JSON.stringify(args) } }],
+              },
+            }],
+            usage: { prompt_tokens: 812, completion_tokens: 43, total_tokens: 855 },
+          });
+        }
+      }
+
+      // ③ 拿到结果了：给出回答
+      return done(answer());
     });
   });
   return new Promise((r) => server.listen(0, '127.0.0.1', () => r({
     server,
     seen,
+    ctl,
     url: `http://127.0.0.1:${server.address().port}/v1`,
     close: () => server.close(),
   })));
@@ -320,14 +384,20 @@ async function main() {
   fs.mkdirSync(dataDir, { recursive: true });
 
   const log = new Log({ level: 'error', buffer: 50 });
+
+  // 网关现在只有一条路：模型检索 → 选工具 → 看结果 → 再决定。所以整个 e2e 都把
+  // AI 开着，假端点按这条路走（见 mockLlm）。要给某条用例换个"模型的选择"，
+  // 改 llm.ctl 就行，不用再起一个端点。
+  const llm = await mockLlm({ want: 'status' });
+
   const config = {
     gateway: { default_app: null, confirm_risk: ['high'], confirm_ttl: 60, call_timeout: 15, async_after: 5 },
-    routing: { local_threshold: 0.5, ask_threshold: 0.25, llm_when: 'never' },
-    // 这套用例逐条锁的是**单轮**编排的行为（本地命中/降级/自动打开/换词…）。
-    // 闭环是另一条路径，脚本是 test:loop，别在这里混着测——否则一个改判据就两套一起红，
-    // 分不清是"闭环退化了"还是"单轮本来就这样"。
-    agent: { mode: 'off' },
-    llm: { enabled: false, providers: {} },
+    routing: { search_limit: 8 },
+    agent: { max_rounds: 6, max_ms: 20000 },
+    llm: {
+      enabled: true, default: 'mock', timeout: 5, max_tokens: 256,
+      providers: { mock: { type: 'openai', base_url: llm.url, model: 'deepseek-flash', api_key: 'k' } },
+    },
     apps: [{
       id: 'mail', label: '邮箱', aliases: ['邮件'],
       transport: 'mcp-http', url: mcpUrl,
@@ -386,11 +456,15 @@ async function main() {
   ok('body 有 base_info.channel_version', !!b?.body.base_info?.channel_version);
   ok('body 有 base_info.bot_agent', !!b?.body.base_info?.bot_agent);
 
-  console.log('\n=== ③ 一句话 → 工具 → 回复 ===');
+  console.log('\n=== ③ 一句话 → 检索 → 工具 → 回复 ===');
+  llm.ctl.want = 'status';
+  llm.ctl.search = '状态';
   il.push({ from_user_id: 'wxid_me', context_token: 'CTX-1', msg_id: 'm1', item_list: [{ type: 1, text_item: { text: '邮箱 状态' } }] });
-  for (let i = 0; i < 40 && !outbox.length; i++) await sleep(100);
+  for (let i = 0; i < 60 && !outbox.length; i++) await sleep(100);
   ok('回了话', outbox.length === 1, JSON.stringify(outbox));
   ok('回复内容正确', /一切正常/.test(outbox[0] || ''), outbox[0]);
+  ok('模型先检索再调工具（不是靠本地猜）',
+    llm.seen.filter((s) => s.body.tools?.length).length >= 2, `${llm.seen.length} 次请求`);
   const sent = il.seen.sends.at(-1);
   ok('发消息带 context_token', sent?.msg?.context_token === 'CTX-1');
   ok('发消息 to_user_id 正确', sent?.msg?.to_user_id === 'wxid_me');
@@ -399,8 +473,11 @@ async function main() {
 
   console.log('\n=== ④ 列表渲染 ===');
   outbox.length = 0;
+  calls.length = 0;
+  llm.ctl.want = 'list_messages';
+  llm.ctl.search = '未读';
   il.push({ from_user_id: 'wxid_me', context_token: 'CTX-2', msg_id: 'm2', item_list: [{ type: 1, text_item: { text: '查一下未读' } }] });
-  for (let i = 0; i < 40 && !outbox.length; i++) await sleep(100);
+  for (let i = 0; i < 60 && !outbox.length; i++) await sleep(100);
   ok('列表被列表化', /共 3 条/.test(outbox[0] || ''), outbox[0]);
   ok('条目带发件人与未读标记', /张三/.test(outbox[0] || '') && /未读/.test(outbox[0] || ''), outbox[0]);
 
@@ -432,6 +509,7 @@ async function main() {
   // 反过来：设了 include 白名单，新工具会被挡住——但必须仍然出现在 available 里，
   // 否则编辑页看不到它，用户永远没机会把它勾上。
   const mailApp = registry.getApp('mail').cfg;
+  const mailTools = mailApp.tools;          // 存下来，等下要原样还回去
   mailApp.tools = { include: ['status'] };
   await registry.refreshAll();
   avail = registry.stats().apps[0].available || [];
@@ -440,11 +518,14 @@ async function main() {
   ok('并标注为未启用', fresh?.enabled === false);
   ok('索引里确实没有它', !registry.tools.some((t) => t.name === 'archive_message'));
 
-  // 复原，别影响后面几条用例
-  mailApp.tools = {};
+  // 复原，别影响后面几条用例。这里必须还回**原来那个对象**：写成 `{}` 会把
+  // 上面配的 aliases（list_messages: ['未读']）一起抹掉，后面所有靠「未读」
+  // 检索的用例都会静默变成"搜不到"，却不报错。
+  mailApp.tools = mailTools;
   EXTRA_TOOLS.length = 0;
   await registry.refreshAll();
   ok('复原后回到 4 个工具', registry.tools.length === 4, JSON.stringify(registry.tools.map((t) => t.name)));
+  ok('复原后别名还在', registry.search('未读', { limit: 3 }).results[0]?.tool.name === 'list_messages');
 
   console.log('\n=== ④d 主题三态：跟随系统 / 浅色 / 深色 ===');
   {
@@ -464,7 +545,7 @@ async function main() {
     // 真实事故：用户问「有几封未读邮件」，本地索引把 title「读取附件内容」的首字「读」
     // 当成动作词硬命中（0.82 > 阈值），于是去调 read_attachment、回头要 uid。
     // 这里用一组最小工具复现那条路径，钉住修复。
-    const rr = new Registry({ routing: { local_threshold: 0.5, ask_threshold: 0.25 }, apps: [] });
+    const rr = new Registry({ routing: {}, apps: [] });
     rr.apps.set('mail', {
       cfg: { id: 'mail', label: '邮箱' },
       status: 'online',
@@ -476,12 +557,13 @@ async function main() {
     });
     rr._build();
 
-    const m1 = rr.match('有几封未读邮件');
-    ok('问未读数不再落到「读附件」', m1.best?.tool.name !== 'read_attachment', m1.best?.tool.key);
-    ok('而是落到未读相关的工具', m1.best?.tool.name === 'unread_count', m1.best?.tool.key);
+    // 现在用 search()：它只排序、不做决定，所以这里断言的是"排第一的是谁"。
+    const m1 = rr.search('有几封未读邮件');
+    ok('问未读数不再落到「读附件」', m1.results[0]?.tool.name !== 'read_attachment', m1.results[0]?.tool.key);
+    ok('而是落到未读相关的工具', m1.results[0]?.tool.name === 'unread_count', m1.results[0]?.tool.key);
 
-    const m2 = rr.match('读取附件');
-    ok('真要读附件时仍然命中', m2.best?.tool.name === 'read_attachment' && m2.confident, `${m2.best?.tool.key} / ${m2.best?.score?.toFixed(2)}`);
+    const m2 = rr.search('读取附件');
+    ok('真要读附件时仍然排第一', m2.results[0]?.tool.name === 'read_attachment', `${m2.results[0]?.tool.key} / ${m2.results[0]?.score?.toFixed(2)}`);
 
     // 单字别名不再进索引：句子里出现「读」「删」这种字不足以把工具顶成 confident
     const singles = rr.tools.flatMap((t) => t.derived.filter((a) => a.length < 2));
@@ -501,7 +583,7 @@ async function main() {
     const extra = Array.from({ length: 44 }, (_, i) =>
       '词' + String.fromCharCode(0x4e00 + i * 2) + String.fromCharCode(0x4e01 + i * 2)).join(' ');
     const desc = '未读 摘要 附件 大小 日期 发件 收件 状态 ' + extra;
-    const rr = new Registry({ routing: { local_threshold: 0.5, ask_threshold: 0.25 }, apps: [] });
+    const rr = new Registry({ routing: {}, apps: [] });
     rr.apps.set('mail', {
       cfg: { id: 'mail', label: '邮箱' },
       status: 'online',
@@ -511,8 +593,8 @@ async function main() {
       ],
     });
     rr._build();
-    const m = rr.match('列出未读邮件 ' + extra);
-    ok('分数差超过 2 个点就按分数来，不再让字典序翻盘', m.best?.tool.name === 'zzz_list', `${m.best?.tool.key} / ${m.best?.score?.toFixed(3)}`);
+    const m = rr.search('列出未读邮件 ' + extra);
+    ok('分数差超过 2 个点就按分数来，不再让字典序翻盘', m.results[0]?.tool.name === 'zzz_list', `${m.results[0]?.tool.key} / ${m.results[0]?.score?.toFixed(3)}`);
 
     // 渲染层：数字型 unread 要显示出来，0 则不标
     const out = renderResult(
@@ -565,7 +647,7 @@ async function main() {
     // 应用作者习惯把最要紧的一句放描述末尾（「指名邮箱就必须传 account」正是这种）。
     // 以前一律截到 300 字，正好把末尾的硬约束剪掉，模型只看到中性说明就开始漏参数。
     const tail = '用户指名了某个邮箱时必须传 account，不要查全部账号。';
-    const long = new Registry({ routing: { local_threshold: 0.5, ask_threshold: 0.25 }, apps: [] });
+    const long = new Registry({ routing: {}, apps: [] });
     long.apps.set('mail', {
       cfg: { id: 'mail', label: '邮箱' },
       status: 'online',
@@ -576,27 +658,18 @@ async function main() {
     ok('长描述不再把末尾的硬约束剪掉', shipped.includes('必须传 account'), `${shipped.length} 字`);
   }
 
-  console.log('\n=== ④g 日志要看得出「是不是 AI 认的」和花了多少 token ===');
+  console.log('\n=== ④g 日志要看得出「是谁认的」和花了多少 token ===');
   {
-    // 用户要的是这两列的**准确性**：本地命中要标本地且不编造 token，
-    // AI 命中要带服务商/模型/用量。所以这里让整条链路真跑一遍。
-    const localRec = logged.find((x) => x.via === 'local');
-    const localRow = formatCall(localRec || {});
-    ok('本地命中记为 via=local', localRow.via === 'local', String(localRow.via));
-    ok('本地命中不带 token（是空，不是 0）', localRow.tok === null && localRow.tokIn === null, JSON.stringify(localRow));
-
-    const llm = await mockLlm();
-    config.llm = {
-      enabled: true, default: 'mock', timeout: 5, max_tokens: 128,
-      providers: { mock: { type: 'openai', base_url: llm.url, model: 'deepseek-flash', api_key: 'k' } },
-    };
-    config.routing.llm_when = 'miss';
-
+    // 这两列必须准：走了 AI 就带服务商/模型/用量，且用量是**整轮所有请求的和**
+    // （检索一次、调工具一次、收尾回答一次，三次都烧 token）。
     outbox.length = 0;
+    calls.length = 0;
+    llm.seen.length = 0;
+    llm.ctl.want = 'list_messages';
+    llm.ctl.search = '未读';
     il.push({ from_user_id: 'wxid_me', context_token: 'CTX-L', msg_id: 'mL', item_list: [{ type: 1, text_item: { text: '那个东西现在怎么样了' } }] });
-    for (let i = 0; i < 40 && !outbox.length; i++) await sleep(100);
+    for (let i = 0; i < 60 && !outbox.length; i++) await sleep(100);
 
-    ok('本地没听懂时确实问了 AI', llm.seen.length === 1, `${llm.seen.length} 次`);
     // 这一条钉的是「AI 根本不能用」的整类故障：内部工具名是「应用.工具」，
     // 点号不合法，DeepSeek 会回 Invalid 'tools[0].function.name'。
     // 假端点现在会像真端点一样校验，转义坏了这里立刻红。
@@ -604,62 +677,79 @@ async function main() {
     ok('发给 AI 的工具名合法（否则 DeepSeek 直接 400）',
       sentNames.length > 0 && sentNames.every((n) => /^[a-zA-Z0-9_-]{1,64}$/.test(n)),
       sentNames.join(','));
-    // 两个工具都能答时，模型会挑省事的那个（回一串计数）。提示词必须点明要明细就去明细。
+    // 两个工具都能答时，模型会挑省事的那个。提示词必须点明「看到了清单不等于看过了正文」。
     const sysPrompt = llm.seen[0]?.body?.messages?.[0]?.content || '';
-    ok('提示词要求「要明细就别选只给统计的」', /只给统计/.test(sysPrompt), sysPrompt.slice(0, 60));
+    ok('提示词要求先检索再调工具', /search_tools/.test(sysPrompt) && /目录/.test(sysPrompt), sysPrompt.slice(0, 60));
+    // 目录只给应用和工具名，不塞 schema —— 这是"接十个应用也不炸上下文"的关键。
+    ok('常驻的只有检索工具 + 应用目录', /可用应用/.test(sysPrompt) && sentNames.length <= 2, `${sentNames.length} 个常驻`);
+
     const rec = logged.at(-1);
-    ok('AI 选中的调用记为 via=llm', rec?.via === 'llm', String(rec?.via));
+    ok('闭环记为 via=llm', rec?.via === 'llm', String(rec?.via));
     ok('带上服务商与模型', rec?.provider === 'mock' && rec?.model === 'deepseek-flash', `${rec?.provider}/${rec?.model}`);
-    ok('带上 token 用量（input/output/total 已统一）',
-      rec?.usage?.input === 812 && rec?.usage?.output === 43 && rec?.usage?.total === 855,
-      JSON.stringify(rec?.usage));
+    const callsCount = llm.seen.length;
+    ok('token 用量是整轮之和',
+      rec?.usage?.total === 855 * callsCount && rec?.usage?.input === 812 * callsCount,
+      `${JSON.stringify(rec?.usage)} / ${callsCount} 次请求`);
+    ok('标题里写清调了哪个工具', /list_messages/.test(rec?.tool?.title || ''), rec?.tool?.title);
 
     const row = formatCall(rec || {});
-    ok('落盘记录带 token 三件套', row.tokIn === 812 && row.tokOut === 43 && row.tok === 855, JSON.stringify(row));
-
-    // 「总是先问 AI」这一档的核心承诺：本地明明认得出，也必须先交给 AI。
-    // 少了这条断言，"选了总是问 AI 却还是本地"这种回归没人挡得住。
-    config.routing.llm_when = 'always';
-    llm.seen.length = 0;
-    outbox.length = 0;
-    il.push({ from_user_id: 'wxid_me', context_token: 'CTX-AL', msg_id: 'mAL', item_list: [{ type: 1, text_item: { text: '列出邮箱账号' } }] });
-    for (let i = 0; i < 40 && !outbox.length; i++) await sleep(100);
-
-    ok('总是问 AI：本地能命中也要先问 AI', llm.seen.length === 1, `${llm.seen.length} 次`);
-    const recA = logged.at(-1);
-    ok('总是问 AI：用的是 AI 选的那个工具', recA?.via === 'llm' && recA?.tool?.name === 'list_messages',
-      `${recA?.via}/${recA?.tool?.name}`);
-    ok('总是问 AI：这种记录没有降级标记', !recA?.aiError, String(recA?.aiError));
-
-    // 还原，别把 AI 开着影响后面几条
-    config.llm = { enabled: false, providers: {} };
-    config.routing.llm_when = 'never';
-    llm.server.close();
+    ok('落盘记录带 token 三件套', row.tokIn === 812 * callsCount && row.tok === 855 * callsCount, JSON.stringify(row));
   }
 
-  console.log('\n=== ④i AI 挂了要说明为什么退回本地 ===');
+  console.log('\n=== ④g2 没配模型时明说，不装作听懂了 ===');
   {
-    // 用户设了「总是先问 AI」，日志却写"本地"——如果不说原因，只能得出
-    // "设置没生效"这个错误结论。这里让 AI 必然失败，验证降级路径留下证据。
+    // 本地匹配那条路已经删干净了：没有模型就等于没有大脑。这时必须直说
+    // 「请先配置模型」，而不是回一句"没听懂"或者偷偷执行点什么。
+    const alive = config.llm;
+    config.llm = { enabled: false, providers: {} };
+    outbox.length = 0;
+    calls.length = 0;
+    il.push({ from_user_id: 'wxid_me', context_token: 'CTX-N', msg_id: 'mN', item_list: [{ type: 1, text_item: { text: '查一下未读' } }] });
+    for (let i = 0; i < 60 && !outbox.length; i++) await sleep(100);
+    ok('明说要去配模型', /配置|模型/.test(outbox[0] || ''), outbox[0]);
+    ok('没有偷偷执行任何工具', calls.length === 0, JSON.stringify(calls.map((c) => c.name)));
+    // 斜杠指令不受影响：那是协议层，答案空间是枚举的
+    outbox.length = 0;
+    il.push({ from_user_id: 'wxid_me', context_token: 'CTX-N2', msg_id: 'mN2', item_list: [{ type: 1, text_item: { text: '/status' } }] });
+    for (let i = 0; i < 40 && !outbox.length; i++) await sleep(100);
+    ok('没模型时 /status 照样能用', /AI/.test(outbox[0] || ''), outbox[0]);
+    config.llm = alive;
+  }
+
+  console.log('\n=== ④i AI 挂了要说清，而不是静默失败 ===');
+  {
+    // 以前 AI 挂了会"退回本地继续"，那正是错着执行的来源。现在没有本地可退，
+    // 所以只剩一件事要做对：告诉用户这次没成，而不是让他干等或者看到一句无关的话。
+    const alive = config.llm;
     config.llm = {
       enabled: true, default: 'dead', timeout: 3, max_tokens: 64,
       providers: { dead: { type: 'openai', base_url: 'http://127.0.0.1:9', model: 'x', api_key: 'k' } },
     };
-    config.routing.llm_when = 'always';
-
     outbox.length = 0;
+    calls.length = 0;
     il.push({ from_user_id: 'wxid_me', context_token: 'CTX-D', msg_id: 'mD', item_list: [{ type: 1, text_item: { text: '列出邮箱账号' } }] });
-    for (let i = 0; i < 60 && !outbox.length; i++) await sleep(100);
+    for (let i = 0; i < 80 && !outbox.length; i++) await sleep(100);
 
-    const rec = logged.at(-1);
-    ok('AI 挂了仍然回落到本地执行', rec?.via === 'local', String(rec?.via));
-    ok('记录里带着失败原因', !!rec?.aiError, String(rec?.aiError));
-    const row = formatCall(rec || {});
-    ok('落盘记录也带原因（界面靠它显示降级）', !!row.aiErr, String(row.aiErr));
-    ok('原因不会撑爆一条日志', (row.aiErr || '').length <= 160, String((row.aiErr || '').length));
+    ok('AI 挂了不会兜底执行', calls.length === 0, JSON.stringify(calls.map((c) => c.name)));
+    ok('并且给了一句人话', /没弄成|再试|太长/.test(outbox[0] || ''), outbox[0]);
+    ok('不把内部报错原文甩给用户', !/ECONNREFUSED|fetch failed|127\.0\.0\.1/.test(outbox[0] || ''), outbox[0]);
+    config.llm = alive;
+  }
 
-    config.llm = { enabled: false, providers: {} };
-    config.routing.llm_when = 'never';
+  console.log('\n=== ④h0 前端脚本先得过语法关 ===');
+  {
+    // 页面脚本语法错了，浏览器只会把整段 JS 丢掉：界面照常渲染出骨架，
+    // 但所有交互都是死的，而且服务端毫无感知。真机上表现为"点了没反应"，
+    // 排查时最容易怀疑到接口上。这里用 node --check 直接钉住。
+    for (const f of ['app.js']) {
+      let errText = '';
+      try {
+        execFileSync(process.execPath, ['--check', new URL(`../src/web/${f}`, import.meta.url).pathname.replace(/^\//, '')], { stdio: 'pipe' });
+      } catch (e) {
+        errText = String(e.stderr || e.message).split('\n').slice(0, 3).join(' ');
+      }
+      ok(`${f} 语法正确`, !errText, errText);
+    }
   }
 
   console.log('\n=== ④h 两个页面都要有标签页图标 ===');
@@ -757,11 +847,12 @@ async function main() {
     ok('没有 query 参数的工具不折腾',
       Agent.altQueries({ name: 'list_messages', inputSchema: { properties: { account: {} } } }, { account: 'x' }, '验证码').length === 0);
 
+    // 最新那条用「现在」：写死日期会让「最近这条（今天 …）」这条断言在隔天变成假红。
     const rendered = renderResult({ title: '搜索邮件' }, {
       data: {
         messages: [
           { uid: 11, subject: '感谢您在 Steam 上的购买！', date: '2026-10-29T02:11:00Z' },
-          { uid: 22, subject: '您的 Steam 帐户：来自新网页或移动设备的访问', date: '2026-11-10T06:01:00Z' },
+          { uid: 22, subject: '您的 Steam 帐户：来自新网页或移动设备的访问', date: new Date().toISOString() },
           { uid: 33, subject: '感谢您在 Steam 上的购买！', date: '2026-09-29T08:13:00Z' },
         ],
       },
@@ -967,8 +1058,8 @@ async function main() {
   console.log('\n=== ④m 连续对话：上一轮的结果要接得住 ===');
   {
     // 2026-11-09 用户的真实截图：先搜到 1 封旅游邮件，接着说「总结一下大概内容」，
-    // 网关却回了 20 封无关邮件。根因是每句话都被当成孤立请求——识别层只收到这一句，
-    // 模型完全不知道上一轮发生过什么，只能把「内容」理解成"再列一遍邮件"。
+    // 网关却回了 20 封无关邮件。根因是每句话都被当成孤立请求——模型只知道这一句，
+    // 完全不知道上一轮发生过什么，只能把「内容」理解成"再列一遍邮件"。
     EXTRA_TOOLS.push(
       {
         name: 'search_messages',
@@ -986,40 +1077,60 @@ async function main() {
       },
     );
     await registry.refreshAll();
+    if (process.env.E2E_DEBUG) console.error('[dbg ④m]', registry.tools.length, registry.stats().apps.map((a) => `${a.id}:${a.status}`).join(','));
 
-    const llm = await mockLlm({ pick: () => 'search_messages', args: JSON.stringify({ query: '旅游' }) });
-    config.llm = {
-      enabled: true, default: 'mock', timeout: 5, max_tokens: 256,
-      providers: { mock: { type: 'openai', base_url: llm.url, model: 'deepseek-flash', api_key: 'k' } },
-    };
-    config.routing.llm_when = 'miss';
+    // 剧本：检索 → 搜邮件 → 完。第二轮再由用例换成更长的剧本。
+    llm.ctl.want = 'search_messages';
+    llm.ctl.search = '邮件';
+    llm.ctl.args = { query: '旅游' };
+    llm.ctl.answer = '找到 1 封：旅游合同签订成功通知（全国旅游监管服务平台）';
 
     outbox.length = 0;
     calls.length = 0;
     il.push({ from_user_id: 'wxid_me', context_token: 'CTX-D1', msg_id: 'mD1', item_list: [{ type: 1, text_item: { text: '帮我找一封有关旅游的邮件' } }] });
-    for (let i = 0; i < 40 && !outbox.length; i++) await sleep(100);
+    for (let i = 0; i < 60 && !outbox.length; i++) await sleep(100);
     ok('第一轮搜到那封旅游邮件', /旅游合同/.test(outbox[0] || ''), outbox[0]);
+    // 列表里必须带 uid：模型要读正文就得靠它。0.4.1 线上「邮件不存在」就是这一环缺了——
+    // 给用户看的那份不能带内部参数，给模型看的那份必须带，两份分别渲染。
+    const modelSaw = llm.seen.filter((s) => s.body.tools?.length)
+      .flatMap((s) => (s.body.messages || []).filter((m) => m.role === 'tool').map((m) => m.content)).join('\n');
+    ok('给模型看的那份列表带 uid', /uid=201/.test(modelSaw), modelSaw.slice(0, 120));
+    ok('给用户看的那份不带内部参数', !/uid=/.test(outbox[0] || ''), outbox[0]);
+    // 两条渲染路径必须是分开的：给模型的那份带定位参数，给用户的那份一个都不能露
+    const both = { isError: false, text: '', data: { messages: [{ uid: 201, subject: '旅游合同', account: 'QQ邮箱', folder: 'INBOX' }] } };
+    ok('同一份数据两种渲染各司其职',
+      /uid=201/.test(renderResult({ name: 'list_messages' }, both, { forModel: true }).text)
+        && !/uid=/.test(renderResult({ name: 'list_messages' }, both).text), '');
 
-    // 第二轮：这句话自己没有对象，全部信息都在上一轮里
+    // 第二轮：这句话自己没有对象，全部信息都在上一轮里。
+    // 新链路里模型会自己重搜一次拿到 uid，再读正文——所以要三步剧本。
+    llm.ctl.want = 'read_message';
+    llm.ctl.search = '邮件';
+    llm.ctl.args = { uid: 201 };
+    llm.ctl.answer = '要点：10 月 1 日出发，出发前 3 天确认集合时间。';
     outbox.length = 0;
     calls.length = 0;
     il.push({ from_user_id: 'wxid_me', context_token: 'CTX-D2', msg_id: 'mD2', item_list: [{ type: 1, text_item: { text: '总结一下大概内容' } }] });
-    for (let i = 0; i < 60 && !outbox.length; i++) await sleep(100);
+    for (let i = 0; i < 80 && !outbox.length; i++) await sleep(100);
 
     const called = calls.map((c) => c.name);
-    ok('接的是上一轮那一封，不是把清单又列一遍',
-      called.includes('read_message') && !called.includes('list_messages'), JSON.stringify(called));
+    ok('接着上一轮的对象去做，不是把清单又列一遍',
+      called.includes('read_message'), JSON.stringify(called));
     const readArg = calls.find((c) => c.name === 'read_message')?.args || {};
-    ok('上一轮的 uid 被带过来了', readArg.uid === 201, JSON.stringify(readArg));
+    ok('读的是上一轮那一封', readArg.uid === 201, JSON.stringify(readArg));
     ok('给的是摘要，不是整篇原文',
       /要点/.test(outbox.at(-1) || '') && !/逾期未确认视为放弃/.test(outbox.at(-1) || ''), outbox.at(-1));
 
     // 第三轮：换一句需要重新选工具的话。历史必须一起发给模型，
     // 否则它还是会像第一次那样凭空猜。
+    llm.ctl.want = 'search_messages';
+    llm.ctl.search = '邮件';
+    llm.ctl.args = { query: '旅游' };
+    llm.ctl.answer = null;
     llm.seen.length = 0;
     outbox.length = 0;
     il.push({ from_user_id: 'wxid_me', context_token: 'CTX-D3', msg_id: 'mD3', item_list: [{ type: 1, text_item: { text: '那封邮件是几号发的' } }] });
-    for (let i = 0; i < 60 && !outbox.length; i++) await sleep(100);
+    for (let i = 0; i < 80 && !outbox.length; i++) await sleep(100);
 
     const routed = llm.seen.filter((s) => Array.isArray(s.body?.tools) && s.body.tools.length);
     const msgs = routed.at(-1)?.body?.messages || [];
@@ -1052,47 +1163,44 @@ async function main() {
       JSON.stringify({ a: pickedD?.a, digest: pickedD?.meta?.digest }));
 
     // 问「内容」却只拿到清单，等于没回答。2026-11-10 用户截图：「steam登录验证码是多少」
-    // 网关回了 10 条清单就停了，得再回一个「1」才看到验证码。模型没选错（读正文要 uid），
-    // 缺的是「搜完接着打开最新那封」这一跳。走真实链路跑一遍，不只是验决策函数。
+    // 网关回了 10 条清单就停了，得再回一个「1」才看到验证码。现在这一跳由模型自己补：
+    // 它拿到带 uid 的列表后就接着读正文。这里验的是"整条链路真的能走通"。
+    llm.ctl.want = 'read_message';
+    llm.ctl.search = '邮件';
+    llm.ctl.args = { uid: 301 };
+    llm.ctl.answer = null;
     outbox.length = 0;
     calls.length = 0;
     il.push({ from_user_id: 'wxid_me', context_token: 'CTX-D5', msg_id: 'mD5', item_list: [{ type: 1, text_item: { text: 'steam登录验证码是多少' } }] });
-    for (let i = 0; i < 60 && !outbox.length; i++) await sleep(100);
+    for (let i = 0; i < 80 && !outbox.length; i++) await sleep(100);
     const chainCalls = calls.map((c) => c.name);
     ok('问内容时自己接着打开，不用再回「1」',
-      chainCalls.includes('search_messages') && chainCalls.includes('read_message'), JSON.stringify(chainCalls));
+      chainCalls.includes('read_message'), JSON.stringify(chainCalls));
     ok('打开的正是搜到的那封',
-      calls.find((c) => c.name === 'read_message')?.args?.uid === 201,
+      calls.find((c) => c.name === 'read_message')?.args?.uid === 301,
       JSON.stringify(calls.find((c) => c.name === 'read_message')?.args));
-    ok('先交代一句，再给正文',
-      /打开这条/.test(outbox.at(-1) || '') && /境内旅游合同/.test(outbox.at(-1) || ''), outbox.at(-1));
+    ok('正文里的验证码真的进了回答', /ABCDF/.test(outbox.at(-1) || ''), outbox.at(-1));
 
-    // 另一种失败形态：模型把泛词（验证码）填成关键词，而应用侧这类词只能靠正文命中，
-    // 正文没进索引就是空手。网关得自己换个词重搜，而不是把「没搜到」直接甩给用户。
-    const llm2 = await mockLlm({ pick: () => 'search_messages', args: JSON.stringify({ query: '验证码' }) });
-    config.llm = {
-      enabled: true, default: 'mock2', timeout: 5, max_tokens: 256,
-      providers: { mock2: { type: 'openai', base_url: llm2.url, model: 'deepseek-flash', api_key: 'k' } },
-    };
+    // 搜不到时不能把"没搜到"直接当结论：网关要在检索结果里明确告诉模型换词再搜。
+    // 这条提示是本地唯一还"说话"的地方，措辞退化了模型就会原地认输。
+    llm.ctl.want = 'search_messages';
+    llm.ctl.search = '验证码';
+    llm.ctl.args = { query: '验证码' };
+    llm.ctl.answer = null;
     outbox.length = 0;
     calls.length = 0;
-    il.push({ from_user_id: 'wxid_me', context_token: 'CTX-D6', msg_id: 'mD6', item_list: [{ type: 1, text_item: { text: 'steam登录验证码是多少' } }] });
-    for (let i = 0; i < 60 && !outbox.length; i++) await sleep(100);
-    const queries = calls.filter((c) => c.name === 'search_messages').map((c) => c.args?.query);
-    ok('搜「验证码」空手时换词重搜，不直接把「没搜到」甩出去',
-      queries.length >= 2 && queries[0] === '验证码' && queries.includes('steam'), JSON.stringify(queries));
-    ok('换词命中后照样接着打开正文',
-      calls.find((c) => c.name === 'read_message')?.args?.uid === 301, JSON.stringify(calls.map((c) => c.name)));
-    ok('换过词要交代清楚，不能假装是「验证码」搜出来的',
-      /换成「steam」/.test(outbox.at(-1) || ''), outbox.at(-1));
-    ok('验证码真的出现在回复里', /ABCDF/.test(outbox.at(-1) || ''), outbox.at(-1));
-    await new Promise((r) => llm2.server.close(r));
+    il.push({ from_user_id: 'wxid_me', context_token: 'CTX-D6', msg_id: 'mD6', item_list: [{ type: 1, text_item: { text: '验证码是多少' } }] });
+    for (let i = 0; i < 80 && !outbox.length; i++) await sleep(100);
+    ok('搜空时提示模型换词再搜，而不是让它认输',
+      /换一个说法|没有找到/.test(outbox.at(-1) || ''), outbox.at(-1));
 
     // 复原，别把额外工具留给后面的用例
     EXTRA_TOOLS.length = 0;
-    config.llm = { enabled: false, providers: {} };
     await registry.refreshAll();
-    await new Promise((r) => llm.server.close(r));
+    llm.ctl.want = 'status';
+    llm.ctl.search = '状态';
+    llm.ctl.args = {};
+    llm.ctl.answer = null;
   }
 
   console.log('\n=== ⑤ 重投去重 ===');
@@ -1108,6 +1216,9 @@ async function main() {
   // 而不是"因为应用说了是 high 所以要求确认"。这是双保险里网关那一层。
   const mailCfg = registry.getApp('mail').cfg;
   mailCfg.allow_risk = ['read'];
+  llm.ctl.want = 'reboot';
+  llm.ctl.search = '重启';
+  llm.ctl.args = {};
   outbox.length = 0;
   calls.length = 0;
   il.push({ from_user_id: 'wxid_me', context_token: 'CTX-A', msg_id: 'mA', item_list: [{ type: 1, text_item: { text: '重启' } }] });
@@ -1117,6 +1228,9 @@ async function main() {
   mailCfg.allow_risk = ['read', 'write', 'high'];
 
   console.log('\n=== ⑦ 高危二次确认 ===');
+  llm.ctl.want = 'reboot';
+  llm.ctl.search = '重启';
+  llm.ctl.args = {};
   outbox.length = 0;
   il.push({ from_user_id: 'wxid_me', context_token: 'CTX-3', msg_id: 'm3', item_list: [{ type: 1, text_item: { text: '重启' } }] });
   for (let i = 0; i < 40 && !outbox.length; i++) await sleep(100);
@@ -1128,6 +1242,9 @@ async function main() {
   ok('确认后执行了', calls.some((c) => c.name === 'reboot'), JSON.stringify(calls));
 
   console.log('\n=== ⑧ 缺参数追问 ===');
+  llm.ctl.want = 'send_message';
+  llm.ctl.search = '发送';
+  llm.ctl.args = {};
   outbox.length = 0;
   il.push({ from_user_id: 'wxid_me', context_token: 'CTX-5', msg_id: 'm5', item_list: [{ type: 1, text_item: { text: '发送邮件' } }] });
   for (let i = 0; i < 40 && !outbox.length; i++) await sleep(100);
@@ -1158,6 +1275,9 @@ async function main() {
   ok('重扫后重新上线', wechat.state.status === 'online', wechat.state.status);
   ok('重扫后 bot_id 恢复', wechat.state.botId === 'bot_42', wechat.state.botId);
 
+  llm.ctl.want = 'status';
+  llm.ctl.search = '状态';
+  llm.ctl.args = {};
   outbox.length = 0;
   il.push({ from_user_id: 'wxid_again', context_token: 'CTX-9', msg_id: 'm9', item_list: [{ type: 1, text_item: { text: '邮箱 状态' } }] });
   for (let i = 0; i < 40 && !outbox.length; i++) await sleep(100);

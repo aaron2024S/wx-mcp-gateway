@@ -164,6 +164,8 @@ async function main() {
       text: '一直查',
       tools: TOOLS,
       config: cfg(llm.url),
+      // 显式给轮数：断言的是"给几轮就跑几轮"，不该跟着默认值一起漂
+      maxRounds: 5,
       execute: async () => ({ ok: true, text: '空' }),
     });
     eq('用尽轮数就收手', r.stop, 'max-rounds');

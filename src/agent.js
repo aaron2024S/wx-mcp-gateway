@@ -6,9 +6,9 @@
 // 为什么不把待决状态放在识别之后：用户在确认阶段回"确认"两个字，
 // 如果先走识别，本地索引会把它匹配到某个奇怪的工具上。状态必须最先看。
 
-import { route, renderMenu } from './router.js';
+import { renderMenu } from './router.js';
 import { checkRisk, missingArgs, describeParam, coerceArg, parseInlineArgs, prepareArgs, mergeArgs, runTool, renderResult, riskLabel } from './exec.js';
-import { chatOnce, agentLoop } from './llm.js';
+import { chatOnce, agentLoop, SEARCH_TOOL } from './llm.js';
 import { isYes, isNo, parseOrdinal } from './session.js';
 
 const MAX_INPUT = 2000;
@@ -57,12 +57,9 @@ function metaFields(meta) {
   const m = meta || {};
   return {
     via: m.via || null,
-    score: m.score ?? null,
     provider: m.provider || null,
     model: m.model || null,
     usage: m.usage || null,
-    // 开了「总是问 AI」但 AI 没接上时，这里留着原文原因；界面据此显示"降级"
-    aiError: m.aiError || null,
   };
 }
 
@@ -78,7 +75,16 @@ const HELP_TAIL = [
 // 没有接入任何应用时的统一说法。出厂配置是空的，所以这是很多人的第一屏。
 const NO_APP = [
   '还没有接入任何应用。',
-  '先在控制台「应用」页添加一个 MCP server，之后就能在这里直接下指令。',
+  '先在控制台「应用」页添加一个 MCP server 或 CLI 连接器，之后就能在这里直接下指令。',
+  '',
+  ...HELP_TAIL,
+].join('\n');
+
+// 没配模型时的唯一说法。AI 是这里唯一的大脑，没有它就没有"听懂人话"这回事——
+// 与其用关键词硬猜（会错着执行），不如直接告诉人去哪儿配。
+const NO_AI = [
+  '还没有配置 AI 模型，现在只能执行指令。',
+  '打开控制台 →「设置」→「AI 模型」→ 添加服务商（填接口地址、模型名、密钥），保存后立刻生效。',
   '',
   ...HELP_TAIL,
 ].join('\n');
@@ -300,62 +306,34 @@ export class Agent {
       }
     }
 
-    const history = this._history(chatId);
-
-    // ④ 闭环：让模型自己决定查几步（看结果 → 再决定），而不是一次猜完就交给规则。
-    //    失败/超时/无进展都返回 null，静默回落到下面的单轮路由——这条路径出问题
-    //    不该比现在更差，它只是"能多想几步"的那个版本。
-    if (this._loopEnabled()) {
-      const viaLoop = await this._agentTurn(chatId, raw, trigger, contextToken);
-      if (viaLoop) return viaLoop;
+    // ④ AI 编排：这是唯一的路。前面 ①②③ 都是「协议层」——斜杠命令、回序号、
+    //    确认取消，答案空间是枚举的，交给模型反而危险（用户说「取消」，模型可能
+    //    理解成"取消订阅"然后去调工具）。语义层的判断一个都不留在本地。
+    if (!this._aiReady()) {
+      this.log?.info?.('agent', '没配 AI，只执行确定性指令');
+      return say(NO_AI);
     }
 
-    // ⑤ 单轮识别（保底：AI 挂了、闭环超时、或配置里关了闭环）
-    const decision = await route(raw, { registry: this.registry, config: this.config, history });
+    const viaLoop = await this._agentTurn(chatId, raw, trigger, contextToken);
+    if (viaLoop) return viaLoop;
 
-    if (decision.kind === 'say') return say(decision.text);
-    if (decision.kind === 'call') {
-      // 落到容器日志里留一条：界面上的"降级"徽章只有鼠标悬停才看得到原文，
-      // 而"为什么没走 AI"经常要靠 docker logs 才能查清（key 过期、超时）。
-      if (decision.aiError) this.log?.warn?.('route', `AI 没接上，已回落本地：${decision.aiError}`);
-      // 只带「这次是谁认的 + 花了多少」，不要把整个 decision（含工具 schema）塞进会话里
-      const meta = {
-        via: decision.via,
-        score: decision.score,
-        provider: decision.provider,
-        model: decision.model,
-        usage: decision.usage,
-        aiError: decision.aiError || null,
-      };
-      return this._begin(chatId, decision.tool, raw, trigger, contextToken, meta, decision.args || {});
-    }
-
-    // menu
-    const cands = decision.candidates || [];
-    if (!cands.length) {
-      return say('现在没有可用的操作——应用可能都离线了，去控制台看一眼。');
-    }
-    this.sessions.setPending(chatId, { type: 'pick', candidates: cands });
-    return say(renderMenu(cands, decision.note));
+    // 走到这儿说明闭环彻底没成（没工具 / 超时 / 模型空回复）。
+    // 不再回落到"关键词猜一个工具"——那条路会错着执行，代价比"这次没成"大得多。
+    return say('这次没弄成，可能是模型那边超时或报错了。换个说法再试一次？');
   }
 
   // ---- 内部 ---------------------------------------------------------
 
-  // 闭环开关：默认跟 AI 开关走。留 agent.mode='off' 能一键退回单轮，
-  // 排查"到底是模型的问题还是编排的问题"时很有用（对比跑一遍就清楚了）。
-  _loopEnabled() {
-    if (this.config.llm?.enabled !== true) return false;
-    if (this.config.routing?.llm_when === 'never') return false;
-    const mode = String(this.config.agent?.mode || 'auto').toLowerCase();
-    return mode !== 'off' && mode !== 'false' && mode !== '0';
+  // AI 能不能用：只跟「有没有配服务商」有关。以前还有 agent.mode / llm_when 两个
+  // 开关表达"本地优先还是 AI 优先"，那是两套大脑并存时的产物，已经一并删掉。
+  _aiReady() {
+    return this.config.llm?.enabled === true && Object.keys(this.config.llm?.providers || {}).length > 0;
   }
 
   // 跑一轮闭环。返回 {handled:true} 表示这条消息已经处理完；返回 null 表示
-  // 这一路没成（AI 报错、超时、无进展、模型没给出回答），交回单轮路由保底。
+  // 这一路没成（AI 报错、超时、无进展、模型没给出回答）。
   async _agentTurn(chatId, raw, trigger, contextToken) {
-    const tools = this.registry.llmTools(null);
-    if (!tools.length) return null;
-    const maxRounds = Math.min(Math.max(Number(this.config.agent?.max_rounds) || 5, 1), 8);
+    const maxRounds = Math.min(Math.max(Number(this.config.agent?.max_rounds) || 6, 2), 10);
     const maxMs = Math.min(Math.max(Number(this.config.agent?.max_ms) || 45000, 8000), 120000);
     const started = Date.now();
 
@@ -363,7 +341,11 @@ export class Agent {
     try {
       r = await agentLoop({
         text: raw,
-        tools,
+        // 常驻的只有检索工具本身。工具表一个都不进上下文——
+        // 22 个工具的 schema 是 4.5k token，接三个应用就 20k，每轮都要带一遍。
+        tools: [SEARCH_TOOL],
+        catalog: this.registry.catalogText(),
+        search: (q, o) => this.registry.search(q, { limit: this.config.routing?.search_limit || 8, ...o }),
         config: this.config,
         history: this._history(chatId),
         maxRounds,
@@ -371,8 +353,8 @@ export class Agent {
         execute: (name, args) => this._loopExec(chatId, name, args),
       });
     } catch (e) {
-      // 闭环失败绝不能变成"这次没回话"：记一笔原因，让它走原来的单轮路径
-      this.log?.warn?.('agent', `闭环失败，回落单轮：${e?.message || e}`);
+      // 闭环失败绝不能变成"这次没回话"：记一笔原因，让上层给出人话
+      this.log?.warn?.('agent', `闭环失败：${e?.message || e}`);
       return null;
     }
 
@@ -411,9 +393,16 @@ export class Agent {
       return null;
     }
 
+    // 日志里要把「这一步到底调了谁」写清楚：只记一句「AI 闭环（3 步）」，
+    // 出了问题没法回看是哪几个工具被串起来的。检索那一次不算业务工具，排除掉。
+    const usedTools = (r.trace || []).filter((t) => t.tool && t.tool !== 'search_tools').map((t) => t.tool);
     this._logCall({
       trigger,
-      tool: { key: 'agent.loop', title: `AI 闭环（${steps} 步）`, appId: null },
+      tool: {
+        key: 'agent.loop',
+        title: `AI 闭环（${steps} 步）${usedTools.length ? `：${usedTools.join('→')}` : ''}`,
+        appId: null,
+      },
       args: Object.assign({}, ...(r.trace || []).map((t) => t.args || {})),
       ok: true,
       ms: Date.now() - started,
@@ -498,10 +487,10 @@ export class Agent {
   _status() {
     const st = this.registry.stats();
     const on = st.apps.filter((a) => a.status === 'online').length;
-    const llm = this.config.llm?.enabled ? `已启用（默认 ${this.config.llm.default}）` : '未启用（纯本地匹配）';
+    const llm = this._aiReady() ? `已配置（默认 ${this.config.llm.default}）` : '未配置（只能执行指令）';
     return [
       `应用 ${on}/${st.apps.length} 在线 · 工具 ${st.toolCount} 个`,
-      `AI 路由：${llm}`,
+      `AI 模型：${llm}`,
     ].join('\n');
   }
 

@@ -12,6 +12,7 @@
 // 这样用户说「未读」能命中 list_messages，而不是被一堆含「邮件」的工具平分。
 
 import { McpClient, McpError } from './mcp.js';
+import { CliClient, CliError } from './cli.js';
 import { resolveProvider } from './config.js';
 
 const CJK = /[\u4e00-\u9fff]/;
@@ -66,6 +67,9 @@ function deriveTitleAliases(title) {
 // 真正的放行判断还有 app.allow_risk 和 gateway.confirm_risk 两道兜底（见 exec 层）。
 function deriveRisk(tool, overrides) {
   if (overrides && overrides[tool.name]) return overrides[tool.name];
+  // CLI 连接器的工具表是生成出来的，风险由命令动词推导（cli-tools.js），
+  // 比 MCP 的 annotations 更靠谱——那套注释经常整个缺失。
+  if (tool.risk && ['read', 'write', 'high'].includes(tool.risk)) return tool.risk;
   const a = tool.annotations || {};
   if (a.destructiveHint === true) return 'high';
   if (a.readOnlyHint === true) return 'read';
@@ -99,13 +103,28 @@ export class Registry {
       toolCount: 0,
     };
     try {
-      const c = new McpClient({
-        url: appCfg.url,
-        token: appCfg.auth?.token || '',
-        timeout,
-        headers: appCfg.headers || {},
-        id: appCfg.id,
-      });
+      // 两种接入方式收敛到同一个契约（initialize / listTools / callTool），
+      // 上面的索引、渲染、风险、确认全都不用知道底下是 HTTP 还是子进程。
+      const c = appCfg.transport === 'cli'
+        ? new CliClient({
+          id: appCfg.id,
+          bin: appCfg.cli?.bin,
+          prefix: appCfg.cli?.prefix || [],
+          args: appCfg.cli?.args || [],
+          env: appCfg.cli?.env || {},
+          cwd: appCfg.cli?.cwd || null,
+          probe: appCfg.cli?.probe || null,
+          specs: appCfg.cli?.tools || [],
+          generic: appCfg.cli?.generic === true,
+          timeout,
+        })
+        : new McpClient({
+          url: appCfg.url,
+          token: appCfg.auth?.token || '',
+          timeout,
+          headers: appCfg.headers || {},
+          id: appCfg.id,
+        });
       const init = await c.initialize();
       const { tools } = await c.listTools();
       entry.client = c;
@@ -118,7 +137,7 @@ export class Registry {
       this._build();
       return entry;
     } catch (e) {
-      entry.error = e instanceof McpError
+      entry.error = (e instanceof McpError || e instanceof CliError)
         ? { kind: e.kind, message: e.message, detail: e.detail }
         : { kind: 'unknown', message: e?.message || String(e) };
       // 离线时保留上次的工具快照（如果之前连上过），只把状态标记成离线
@@ -159,8 +178,10 @@ export class Registry {
         continue;
       }
       const reconnect = cur.cfg.url !== app.url
+        || (cur.cfg.transport || 'mcp-http') !== (app.transport || 'mcp-http')
         || (cur.cfg.auth?.token || '') !== (app.auth?.token || '')
-        || (cur.cfg.timeout || 0) !== (app.timeout || 0);
+        || (cur.cfg.timeout || 0) !== (app.timeout || 0)
+        || JSON.stringify(cur.cfg.cli || null) !== JSON.stringify(app.cli || null);
       cur.cfg = app;                      // allow_risk / aliases / tools 就地更新
       if (reconnect) await this.refreshApp(app);
     }
@@ -241,6 +262,10 @@ export class Registry {
   }
 
   // 应用前缀：「邮箱 未读」「路由 状态」→ 剥离前缀后只在该应用内搜
+  //
+  // 只有「前缀 + 还有别的内容」才算前缀。整句就是应用名时（用户就发了「邮件」
+  // 两个字，或者模型拿应用名当检索词）不能剥——剥完是空串，一个工具都搜不到，
+  // 表现是「明明有邮箱应用，搜『邮件』却说没有这个能力」。
   _stripAppPrefix(text) {
     const raw = String(text || '').trim();
     for (const [appId, entry] of this.apps) {
@@ -248,17 +273,33 @@ export class Registry {
       for (const n of names) {
         if (!n) continue;
         const re = new RegExp(`^\\s*${n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*[,，、:：\\s]?\\s*`, 'i');
-        if (re.test(raw)) return { text: raw.replace(re, ''), appId };
+        if (!re.test(raw)) continue;
+        const rest = raw.replace(re, '').trim();
+        return rest ? { text: rest, appId } : { text: raw, appId };
       }
     }
     return { text: raw, appId: null };
   }
 
-  match(text) {
-    const { text: q, appId } = this._stripAppPrefix(text);
+  // 检索：给一句话，返回最像的 N 个工具。
+  //
+  // 它**不做决定**。以前这里带 local_threshold / ask_threshold，够 0.5 就直接执行、
+  // 低于 0.25 就说"没听懂"——那条路会错着执行（实测 25 句里有 2 句选错工具还跑了）。
+  // 现在它只是「图书管理员」：模型问"有没有跟硬盘温度有关的"，它把书找出来，
+  // 用不用、用哪本由模型决定。好处是筛错可恢复——模型换个说法能再检索一次，
+  // 而本地预筛那种过滤是不可恢复的。
+  search(text, { appId = null, limit = 6 } = {}) {
+    const { scored, q, app } = this._score(text, appId);
+    return { query: q, appId: app, results: scored.slice(0, Math.max(1, limit)) };
+  }
+
+  _score(text, appId = null) {
+    const stripped = this._stripAppPrefix(text);
+    const q = appId ? String(text || '').trim() : stripped.text;
+    const app = appId || stripped.appId;
     const qLower = q.toLowerCase().trim();
     const qTokens = tokenize(q);
-    const pool = appId ? this.tools.filter((t) => t.appId === appId) : this.tools;
+    const pool = app ? this.tools.filter((t) => t.appId === app) : this.tools;
 
     const scored = [];
     for (const tool of pool) {
@@ -311,21 +352,42 @@ export class Registry {
       return (RISK_ORDER[a.tool.risk] - RISK_ORDER[b.tool.risk])
         || a.tool.key.localeCompare(b.tool.key);
     });
-    const best = scored[0] || null;
-    const second = scored[1] || null;
-    const th = this.config.routing.local_threshold;
-    const ask = this.config.routing.ask_threshold;
+    return { scored, q, app };
+  }
 
-    return {
-      query: q,
-      appId,
-      best,
-      second,
-      candidates: scored.slice(0, 6),
-      confident: !!best && best.score >= th,
-      ambiguous: !!best && best.score >= ask && second && best.score - second.score < 0.12,
-      understood: !!best && best.score >= ask,
-    };
+  // 注意：这里**没有** match() 了。0.5.0 之前它返回 confident / ambiguous，
+  // 由网关据分数决定要不要执行——那等于在模型看见之前就把候选丢掉了。
+  // 现在检索只排序，决定权在模型；想自己看排序结果就用 search()。
+
+  // 给模型看的目录：每个应用一行。schema 一个都不进这里——那才是省 token 的关键。
+  // 22 个工具的完整 schema 是 4.5k token；同样这批工具只报名字约 700 token。
+  catalog() {
+    const byApp = new Map();
+    for (const t of this.tools) {
+      if (!byApp.has(t.appId)) byApp.set(t.appId, []);
+      byApp.get(t.appId).push(t);
+    }
+    return [...this.apps.values()]
+      .filter((e) => e.status === 'online')
+      .map((e) => {
+        const list = byApp.get(e.cfg.id) || [];
+        return {
+          id: e.cfg.id,
+          label: e.cfg.label || e.cfg.id,
+          count: list.length,
+          names: list.map((t) => t.name),
+        };
+      });
+  }
+
+  catalogText({ perApp = 14 } = {}) {
+    const rows = this.catalog();
+    if (!rows.length) return '（现在没有在线的应用）';
+    return rows.map((r) => {
+      const shown = r.names.slice(0, perApp).join('、');
+      const more = r.names.length > perApp ? `…等 ${r.names.length} 个` : '';
+      return `· ${r.label}（${r.id}，${r.count} 个）：${shown}${more}`;
+    }).join('\n');
   }
 
   // 按 "app.tool" 或 "tool" 精确定位

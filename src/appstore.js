@@ -15,6 +15,7 @@
 import path from 'node:path';
 import { readJson, writeJson } from './store.js';
 import { McpClient, McpError } from './mcp.js';
+import { CliClient } from './cli.js';
 import { errText } from './log.js';
 
 const DEFAULT_SETTINGS = {
@@ -24,10 +25,6 @@ const DEFAULT_SETTINGS = {
   call_timeout: 20,
   async_after: 10,
   log_keep: 200,          // 调用日志保留条数（50~200）
-  local_threshold: 0.5,
-  ask_threshold: 0.25,
-  llm_when: 'miss',
-  llm_enabled: false,
   llm_default: '',
 };
 
@@ -56,6 +53,7 @@ export class AppStore {
     this.overrides.hiddenProviders ||= [];
     this.secrets.tokens ||= {};
     this.secrets.apiKeys ||= {};
+    this.secrets.cliEnv ||= {};
   }
 
   _saveOverrides() {
@@ -68,7 +66,7 @@ export class AppStore {
 
   // ---- 应用 ----------------------------------------------------------
 
-  // 给 Registry 用：合并后的完整配置，**含真实 token**
+  // 给 Registry 用：合并后的完整配置，**含真实 token / 环境变量**
   resolvedApps() {
     const byId = new Map();
     for (const a of this.baseConfig.apps || []) {
@@ -80,9 +78,17 @@ export class AppStore {
       // 界面没填过 token 时沿用 config.json 里的那份，否则「只改个名字」
       // 会把写死在配置文件里的凭据悄悄抹掉，表现是对端突然 401。
       merged.auth = { type: 'bearer', token: this.secrets.tokens[a.id] || base.auth?.token || '' };
+      // CLI 连接器的环境变量里常有令牌（UNC_NAS_TOKEN 这类），所以值一律走 secrets，
+      // overrides 里只留键名——否则"配置里不出现明文密钥"这条规矩就破了。
+      if (merged.transport === 'cli') {
+        merged.cli = {
+          ...(base.cli || {}),
+          ...(a.cli || {}),
+          env: { ...(base.cli?.env || {}), ...(this.secrets.cliEnv[a.id] || {}) },
+        };
+      }
       byId.set(a.id, merged);
     }
-    // config.json 里的应用也可能带 token（手写或用环境变量注入），保留原样
     return [...byId.values()];
   }
 
@@ -93,6 +99,7 @@ export class AppStore {
         id: a.id,
         label: a.label || a.id,
         aliases: a.aliases || [],
+        transport: a.transport || 'mcp-http',
         url: a.url,
         allow_risk: a.allow_risk || ['read'],
         tools: a.tools || {},
@@ -100,8 +107,37 @@ export class AppStore {
         source: a._source,
         hasToken: !!a.auth?.token,
       };
+      if (entry.transport === 'cli') {
+        entry.cli = {
+          bin: a.cli?.bin || '',
+          prefix: a.cli?.prefix || [],
+          args: a.cli?.args || [],
+          cwd: a.cli?.cwd || '',
+          probe: a.cli?.probe || [],
+          generic: a.cli?.generic === true,
+          toolCount: (a.cli?.tools || []).length,
+          // 只回键名。值在 secrets.json 里，界面永远读不到。
+          envKeys: Object.keys(a.cli?.env || {}),
+          hasEnv: Object.keys(a.cli?.env || {}).length > 0,
+        };
+        entry.url = '';
+      }
       return entry;
     });
+  }
+
+  // CLI 工具表单独取。整张表可能上百条、几十 KB（unc 是 108 条），
+  // 塞进 /api/state 会被每几秒轮询一次，白耗流量；只有打开编辑向导时才需要它。
+  cliSpecs(id) {
+    const a = this.resolvedApps().find((x) => x.id === id);
+    if (!a || (a.transport || 'mcp-http') !== 'cli') return null;
+    return {
+      bin: a.cli?.bin || '',
+      prefix: a.cli?.prefix || [],
+      args: a.cli?.args || [],
+      generic: a.cli?.generic === true,
+      tools: a.cli?.tools || [],
+    };
   }
 
   upsert(app, token) {
@@ -109,18 +145,60 @@ export class AppStore {
     if (!id) throw new Error('缺少 id');
     if (!/^[a-z0-9_-]{1,32}$/i.test(id)) throw new Error('id 只能用字母、数字、下划线、短横线，最长 32');
 
+    const transport = app.transport === 'cli' ? 'cli' : 'mcp-http';
     const clean = {
       id,
       label: String(app.label || id).trim(),
       aliases: (app.aliases || []).map((s) => String(s).trim()).filter(Boolean),
-      transport: 'mcp-http',
-      url: String(app.url || '').trim(),
+      transport,
+      url: transport === 'mcp-http' ? String(app.url || '').trim() : undefined,
       allow_risk: (app.allow_risk || ['read']).filter((r) => ['read', 'write', 'high'].includes(r)),
       tools: app.tools || {},
       timeout: app.timeout ? Number(app.timeout) : undefined,
     };
-    if (!clean.url) throw new Error('缺少地址');
-    if (!/^https?:\/\//i.test(clean.url)) throw new Error('地址必须以 http:// 或 https:// 开头');
+
+    if (transport === 'cli') {
+      const c = app.cli || {};
+      const bin = String(c.bin || '').trim();
+      if (!bin) throw new Error('CLI 连接器需要可执行文件路径');
+      const tools = Array.isArray(c.tools) ? c.tools : [];
+      // 允许没有工具表，但只在开了兜底工具的前提下。否则这个应用接进来是个
+      // 什么都干不了的壳子，用户会以为网关坏了。
+      if (!tools.length && c.generic !== true) {
+        throw new Error('还没有工具表：先点「探测工具」把它生成出来；解析不出来就勾上「允许执行任意子命令」');
+      }
+      clean.cli = {
+        bin,
+        // 解释器 + 脚本：bin=node, prefix=['/data/x.js']
+        prefix: (Array.isArray(c.prefix) ? c.prefix : []).map(String),
+        args: (Array.isArray(c.args) ? c.args : []).map(String),
+        cwd: c.cwd ? String(c.cwd) : undefined,
+        probe: (Array.isArray(c.probe) ? c.probe : []).map(String),
+        generic: c.generic === true,
+        // 工具表跟着应用存：探测一次要跑几十次 --help（unc 要 7 秒），
+        // 每次启动都重跑纯属浪费，而且容器里没这个耐心。
+        tools,
+      };
+      // 环境变量：值进 secrets，键名留在 clean.cli.envKeys 里（供界面回显）
+      const envIn = c.env && typeof c.env === 'object' ? c.env : null;
+      const keys = Array.isArray(c.envKeys)
+        ? c.envKeys.map((x) => String(x).trim()).filter(Boolean)
+        : Object.keys(envIn || {});
+      clean.cli.envKeys = keys;
+      if (envIn) {
+        const cur = { ...(this.secrets.cliEnv[id] || {}) };
+        for (const [k, v] of Object.entries(envIn)) {
+          if (typeof v === 'string' && v.length) cur[k] = v;
+          else if (v === '' || v === null) delete cur[k];
+        }
+        this.secrets.cliEnv[id] = cur;
+        this._saveSecrets();
+      }
+    } else {
+      if (!clean.url) throw new Error('缺少地址');
+      if (!/^https?:\/\//i.test(clean.url)) throw new Error('地址必须以 http:// 或 https:// 开头');
+      delete this.secrets.cliEnv[id];
+    }
 
     const i = this.overrides.apps.findIndex((x) => x.id === id);
     if (i >= 0) this.overrides.apps[i] = { ...this.overrides.apps[i], ...clean };
@@ -138,8 +216,9 @@ export class AppStore {
   remove(id) {
     const before = this.overrides.apps.length;
     this.overrides.apps = this.overrides.apps.filter((a) => a.id !== id);
-    const hadSecret = !!this.secrets.tokens[id];
+    const hadSecret = !!this.secrets.tokens[id] || !!this.secrets.cliEnv[id];
     delete this.secrets.tokens[id];
+    delete this.secrets.cliEnv[id];
     if (hadSecret) this._saveSecrets();
     this._saveOverrides();
     // 手写配置里的应用不能从界面删（只挡一下，提示用户去改文件）
@@ -149,9 +228,58 @@ export class AppStore {
     return true;
   }
 
-  // 用一份草稿试连，不入库。界面「测试连接」就是它。
+  // 用一份草稿试连，不入库。界面「测试连接 / 探测工具」就是它。
   async testConnection(draft, tokenOverride) {
     const id = draft.id || 'probe';
+    const started = Date.now();
+
+    // CLI 类型：跑一次探活 + 把工具表列出来（探测本身在 /api/cli/probe 里做，
+    // 这里只验证"这份配置现在能不能跑通"）。
+    if (draft.transport === 'cli') {
+      const c = draft.cli || {};
+      const bin = String(c.bin || '').trim();
+      if (!bin) return { ok: false, ms: 0, kind: 'config', message: '没填可执行文件路径' };
+      // 环境变量：界面传来的值 + 已经存过的（编辑时用户没重填）
+      const env = { ...(this.secrets.cliEnv[id] || {}), ...(c.env || {}) };
+      const client = new CliClient({
+        id,
+        bin,
+        prefix: c.prefix || [],
+        args: c.args || [],
+        env,
+        cwd: c.cwd || null,
+        probe: c.probe || null,
+        specs: c.tools || [],
+        generic: c.generic === true,
+        timeout: Math.min(20000, (Number(draft.timeout) || 15) * 1000),
+      });
+      try {
+        const init = await client.initialize();
+        const { tools } = await client.listTools();
+        return {
+          ok: true,
+          ms: Date.now() - started,
+          protocolVersion: init.protocolVersion,
+          serverInfo: init.serverInfo,
+          tools: tools.map((t) => ({
+            name: t.name,
+            title: t.title || '',
+            description: String(t.description || '').slice(0, 200),
+            risk: t.risk || 'read',
+            required: t.inputSchema?.required || [],
+          })),
+        };
+      } catch (e) {
+        return {
+          ok: false,
+          ms: Date.now() - started,
+          kind: e?.kind || 'unknown',
+          message: e?.message || errText(e),
+          hint: '确认这个程序在网关容器里真的存在（路径是容器内路径），并且有执行权限。',
+        };
+      }
+    }
+
     // 界面上没填时，沿用这个应用已有的那份（可能来自 secrets.json，
     // 也可能写在 config.json 里）。否则「只改地址点测试」会拿空令牌去连，
     // 报鉴权失败，看上去像地址填错了。
@@ -167,7 +295,6 @@ export class AppStore {
       headers: draft.headers || {},
       id,
     });
-    const started = Date.now();
     try {
       const init = await c.initialize();
       const { tools } = await c.listTools();
@@ -200,16 +327,12 @@ export class AppStore {
 
   settings() {
     const fromFile = pickSettings(this.baseConfig.gateway || {});
-    const routing = pickSettings(this.baseConfig.routing || {});
     const llm = {
-      llm_enabled: this.baseConfig.llm?.enabled === true,
       llm_default: this.baseConfig.llm?.default || '',
-      llm_when: this.baseConfig.routing?.llm_when || 'miss',
     };
     return {
       ...DEFAULT_SETTINGS,
       ...fromFile,
-      ...routing,
       ...llm,
       ...this.overrides.settings,
     };
@@ -227,13 +350,11 @@ export class AppStore {
     if (patch.confirm_ttl !== undefined) s.confirm_ttl = num(patch.confirm_ttl, 10, 600, 60);
     if (patch.call_timeout !== undefined) s.call_timeout = num(patch.call_timeout, 5, 300, 20);
     if (patch.async_after !== undefined) s.async_after = num(patch.async_after, 1, 120, 10);
-    if (patch.local_threshold !== undefined) s.local_threshold = Math.min(1, Math.max(0.1, Number(patch.local_threshold) || 0.5));
     if (patch.default_app !== undefined) s.default_app = patch.default_app || null;
-    if (patch.llm_when !== undefined && ['never', 'miss', 'ambiguous', 'always'].includes(patch.llm_when)) {
-      s.llm_when = patch.llm_when;
-    }
-    if (patch.llm_enabled !== undefined) s.llm_enabled = patch.llm_enabled === true;
     if (patch.llm_default !== undefined) s.llm_default = String(patch.llm_default || '');
+    // 老配置里可能还留着 local_threshold / ask_threshold / llm_when / llm_enabled。
+    // 这些键现在没有任何代码读，下次保存时顺手清掉，别让它们躺在文件里误导人。
+    for (const dead of ['local_threshold', 'ask_threshold', 'llm_when', 'llm_enabled']) delete s[dead];
     if (Array.isArray(patch.confirm_risk)) {
       s.confirm_risk = patch.confirm_risk.filter((r) => ['read', 'write', 'high'].includes(r));
     }

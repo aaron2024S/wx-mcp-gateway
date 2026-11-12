@@ -21,7 +21,9 @@ import { Agent } from './agent.js';
 import { IlinkClient, DEFAULT_BASE } from './ilink.js';
 import { checkRisk, runTool, renderResult, riskLabel } from './exec.js';
 import { routeWithLLM, listModels } from './llm.js';
-import { route, llmState } from './router.js';
+import { probe, llmState } from './router.js';
+import { introspect } from './cli-tools.js';
+import { installFromUrl, InstallError } from './cli-install.js';
 import { formatCall } from './calllog.js';
 import {
   Auth, AuthError, COOKIE_NAME, MIN_PASSWORD,
@@ -32,6 +34,9 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const WEB_DIR = path.join(HERE, 'web');
 
 const DATA_DIR = path.resolve(process.env.GATEWAY_DATA || 'data');
+// CLI 连接器的可执行文件落在这里：它是数据卷的一部分，所以容器重建不丢、
+// 升级换文件即可，不用重发镜像，也不用为每个 CPU 架构单独做一个镜像层。
+const CLI_DIR = path.join(DATA_DIR, 'connectors');
 const PORT = Number(process.env.PORT || 7337);
 const HOST = process.env.HOST || '0.0.0.0';
 
@@ -76,16 +81,14 @@ function applySettings() {
   config.gateway.confirm_ttl = s.confirm_ttl;
   config.gateway.call_timeout = s.call_timeout;
   config.gateway.async_after = s.async_after;
-  config.routing.local_threshold = s.local_threshold;
-  config.routing.ask_threshold = s.ask_threshold;
-  config.routing.llm_when = s.llm_when;
   config.apps = appStore.resolvedApps();
   config.llm.providers = appStore.resolvedProviders();
   // 默认服务商可能已经被删掉了——不校验的话 llm.default 会指向一个不存在的 id，
   // 表现是"AI 开着但每次调用都报服务商不存在"。
   const provIds = Object.keys(config.llm.providers);
   config.llm.default = provIds.includes(s.llm_default) ? s.llm_default : (provIds[0] || '');
-  config.llm.enabled = s.llm_enabled === true && provIds.length > 0;
+  // 「配了服务商就等于启用」——不再有单独的开关。少一个能配错的地方。
+  config.llm.enabled = provIds.length > 0;
   return s;
 }
 applySettings();
@@ -291,7 +294,9 @@ function overview() {
       const cfg = appStore.list().find((x) => x.id === a.id) || {};
       return {
         ...a,
+        transport: cfg.transport || 'mcp-http',
         url: cfg.url,
+        cli: cfg.cli || null,
         aliases: cfg.aliases || [],
         allow_risk: cfg.allow_risk || ['read'],
         hasToken: !!cfg.hasToken,
@@ -322,7 +327,9 @@ const ROUTES = [
 
   ['POST', /^\/api\/apps\/test$/, async (req) => {
     const body = await readBody(req);
-    if (!body.url) throw new HttpError(400, '缺少地址');
+    if ((body.transport || 'mcp-http') === 'cli') {
+      if (!body.cli?.bin) throw new HttpError(400, '缺少可执行文件路径');
+    } else if (!body.url) throw new HttpError(400, '缺少地址');
     return appStore.testConnection(body, body.token);
   }],
 
@@ -340,6 +347,67 @@ const ROUTES = [
     };
   }],
 
+  // 下载并解包一个 CLI 连接器。装到 /data/connectors/<id>/bin 下。
+  // 不做「执行远程脚本」那套：下载 → 校验 sha256 → 自己解包，全程可审计。
+  ['POST', /^\/api\/cli\/install$/, async (req) => {
+    const body = await readBody(req);
+    const id = String(body.id || '').trim();
+    if (!/^[a-z0-9_-]{1,32}$/i.test(id)) throw new HttpError(400, '先填标识（id）再安装，它决定装到哪个目录');
+    const dest = path.join(CLI_DIR, id, 'bin');
+    try {
+      fs.rmSync(dest, { recursive: true, force: true });
+    } catch { /* 旧目录删不掉就覆盖，不影响这次安装 */ }
+    try {
+      const r = await installFromUrl({
+        url: body.url,
+        sha256: body.sha256 || undefined,
+        destDir: dest,
+        binName: body.binName || '',
+        timeoutMs: 180000,
+      });
+      log.info('cli', `安装 ${id}：${r.bin}（${(r.bytes / 1e6).toFixed(1)} MB，sha256 ${r.sha256.slice(0, 12)}…）`);
+      return { ok: true, ...r };
+    } catch (e) {
+      throw new HttpError(400, e instanceof InstallError ? e.message : errText(e));
+    }
+  }],
+
+  // 探测工具表：跑一遍 `<bin> --help`，把子命令树和参数抽出来。
+  // 一次要跑几十次子进程（unc 约 7 秒），所以只在「导入 / 重新探测」时调用。
+  ['POST', /^\/api\/cli\/probe$/, async (req) => {
+    const body = await readBody(req);
+    const bin = String(body.bin || '').trim();
+    if (!bin) throw new HttpError(400, '先填可执行文件路径');
+    const c = body.cli || {};
+    const id = String(body.id || 'probe');
+    // 环境变量：界面上这次填的 + 之前存过的（编辑时用户往往不重填令牌）
+    const env = { ...(body.env || {}) };
+    for (const [k, v] of Object.entries(appStore.secrets.cliEnv[id] || {})) {
+      if (!(k in env)) env[k] = v;
+    }
+    const started = Date.now();
+    try {
+      const r = await introspect({
+        bin,
+        prefix: c.prefix || body.prefix || [],
+        args: c.args || body.args || [],
+        env,
+        cwd: c.cwd || body.cwd || null,
+        maxTools: 400,
+      });
+      return {
+        ok: r.tools.length > 0,
+        ms: Date.now() - started,
+        tools: r.tools,
+        warnings: r.warnings,
+        root: r.root?.desc || null,
+        message: r.tools.length ? `探测到 ${r.tools.length} 个工具` : (r.warnings[0] || '没有探测到子命令'),
+      };
+    } catch (e) {
+      return { ok: false, ms: Date.now() - started, tools: [], warnings: [], message: errText(e) };
+    }
+  }],
+
   ['DELETE', /^\/api\/apps\/([\w-]+)$/, async (req, m) => {
     appStore.remove(m[1]);
     registry.removeApp(m[1]);
@@ -352,6 +420,14 @@ const ROUTES = [
     if (!cfgApp) throw new HttpError(404, '没有这个应用');
     const entry = await registry.refreshApp(cfgApp);
     return { status: entry.status, toolCount: entry.toolCount, error: entry.error };
+  }],
+
+  // CLI 的完整工具表（带 command / params）。只在打开编辑向导时取——
+  // 它上百条、几十 KB，放进 /api/state 会被前端那轮轮询反复拖走。
+  ['GET', /^\/api\/apps\/([\w-]+)\/cli-specs$/, (req, m) => {
+    const r = appStore.cliSpecs(m[1]);
+    if (!r) throw new HttpError(404, '这个应用不是 CLI 类型');
+    return r;
   }],
 
   // 从控制台手动执行一个工具。这条路径也走完整的风险与日志，
@@ -452,33 +528,31 @@ const ROUTES = [
     }
   }],
 
-  // 全链路自检：一句真话走一遍识别层（只决定、不执行），把"到底走没走 AI、
-  // 为什么没走"一次说清。用户开了「总是先问 AI」却看到日志写"本地"时，
-  // 这里能直接看到是开关没开、没服务商，还是 key/model 报错。
+  // 全链路自检：一句真话走一遍「检索 → 选工具」（只决定、不执行）。
+  // 输出刻意做成三段：检索到哪些候选、AI 选了哪个、花了多少 token。
+  // 接了几个应用之后，这是唯一能看出"上下文到底塞了什么"的窗口。
   ['POST', /^\/api\/llm\/probe$/, async (req) => {
     const body = await readBody(req);
     const text = String(body.text || '').trim().slice(0, 200) || '查一下我的未读邮件';
     const state = llmState(config);
-    const started = Date.now();
-    const d = await route(text, { registry, config });
+    const d = await probe(text, { registry, config });
     return {
       text,
       state,
-      ms: Date.now() - started,
+      ms: d.ms,
       kind: d.kind,
-      // 模型只回了话、没选工具时，把原话带回来——否则界面只能说"没选工具"，
-      // 用户完全看不出它到底在聊什么（常见于不支持 tool calling 的模型）。
-      reply: d.kind === 'say' ? String(d.text || '').slice(0, 120) : null,
-      via: d.via || null,
+      reply: d.reply || null,
       tool: d.tool ? (d.tool.title || d.tool.name) : null,
-      toolKey: d.tool?.key || null,
+      toolKey: d.toolKey || null,
       args: d.args || null,
       provider: d.provider || null,
       model: d.model || null,
       usage: d.usage || null,
-      // 没走 AI 的原因：没开 / 没服务商 / 调用报错 / AI 选了个不存在的工具
-      aiError: d.aiError || (d.kind === 'menu' ? d.note || null : null),
-      candidates: (d.candidates || []).slice(0, 3).map((c) => c.label),
+      error: d.error || null,
+      candidates: d.candidates || [],
+      // 模型自己发起的检索词。这是「它到底怎么找工具」的唯一窗口——
+      // 本地预筛那套已经删了，替它搜过什么等于替它想了什么。
+      queries: d.queries || [],
     };
   }],
 

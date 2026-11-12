@@ -12,15 +12,13 @@ const DEFAULTS = {
     async_after: 10,          // 超过这个秒数就先回执、转后台
   },
   routing: {
-    local_threshold: 0.5,     // 本地匹配达到这个分数直接执行
-    ask_threshold: 0.25,      // 低于这个分数当作"没听懂"
-    llm_when: 'miss',         // miss | ambiguous | always | never
+    // 只保留「检索」这一件事：本地不再决定执行什么，只决定把哪些工具递给模型。
+    // 阈值一个都不留——判断一个工具该不该被执行是模型的事，本地只负责排序。
+    search_limit: 8,          // 每次检索返回几个候选
   },
-  // Agent 闭环：让模型看结果再决定下一步。关掉它就是原来的单轮路由，
-  // 两条路都留着——排查问题时能直接对比同一句话在两种编排下的差别。
+  // Agent 闭环：模型唯一的工作方式。没有第二条路，也不再有开关。
   agent: {
-    mode: 'auto',        // auto（跟 AI 开关走） | off
-    max_rounds: 5,       // 最多几轮工具调用
+    max_rounds: 6,       // 最多几轮工具调用（其中一轮可能花在检索工具上）
     max_ms: 45000,       // 整轮时间预算（毫秒），超了就把已查到的先发出去
   },
   llm: {
@@ -28,7 +26,6 @@ const DEFAULTS = {
     default: '',              // 默认 provider 的 id
     timeout: 15,              // 秒
     max_tokens: 512,
-    on_error: 'local',        // local（回落到本地表） | menu（直接回菜单）
     providers: {},
   },
   apps: [],
@@ -76,12 +73,28 @@ export function validate(cfg) {
     if (ids.has(app.id)) errors.push(`${where} id 重复：${app.id}`);
     ids.add(app.id);
     if (!app.label) warns.push(`${where}(${app.id}) 没有 label，界面上会显示成 id`);
-    if (app.transport && app.transport !== 'mcp-http') {
-      errors.push(`${where}(${app.id}) transport 只支持 mcp-http，收到：${app.transport}`);
+    // 两种接入方式：
+    //   mcp-http —— 连一个网址（对方自己跑着 MCP server）
+    //   cli      —— 在容器里跑一条命令（对方只提供命令行工具）
+    const transport = app.transport || 'mcp-http';
+    if (!['mcp-http', 'cli'].includes(transport)) {
+      errors.push(`${where}(${app.id}) transport 只支持 mcp-http / cli，收到：${app.transport}`);
+    } else if (transport === 'cli') {
+      if (!app.cli?.bin) errors.push(`${where}(${app.id}) 是 cli 类型，缺少 cli.bin（可执行文件路径）`);
+      if (app.cli?.tools && !Array.isArray(app.cli.tools)) {
+        errors.push(`${where}(${app.id}) cli.tools 必须是数组`);
+      }
+      if (app.cli?.prefix && !Array.isArray(app.cli.prefix)) {
+        errors.push(`${where}(${app.id}) cli.prefix 必须是数组（解释器 + 脚本场景用）`);
+      }
+      if (!Array.isArray(app.cli?.tools) || !app.cli.tools.length) {
+        warns.push(`${where}(${app.id}) 还没有工具表，导入后需要先探测一次才能用`);
+      }
+    } else if (!app.url) {
+      errors.push(`${where}(${app.id}) 缺少 url`);
     }
-    if (!app.url) errors.push(`${where}(${app.id}) 缺少 url`);
-    else if (/^https?:\/\/(localhost|127\.0\.0\.1)/.test(app.url) && process.env.GATEWAY_IN_CONTAINER === '1') {
-      warns.push(`${where}(${app.id}) url 用了 localhost——容器里的 localhost 指自己，应该写服务名`);
+    if (app.url && /^https?:\/\/(localhost|127\.0\.0\.1)/.test(app.url) && process.env.GATEWAY_IN_CONTAINER === '1') {
+      warns.push(`${where}(${app.id}) 用的是 localhost —— 容器里那是它自己，连不到别的服务；改用服务名或内网 IP`);
     }
     if (!Array.isArray(app.allow_risk)) {
       app.allow_risk = ['read'];

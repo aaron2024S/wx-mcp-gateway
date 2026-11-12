@@ -9,9 +9,11 @@
     "async_after": 10
   },
   "routing": {
-    "local_threshold": 0.5,
-    "ask_threshold": 0.25,
-    "llm_when": "miss"
+    "search_limit": 8
+  },
+  "agent": {
+    "max_rounds": 6,
+    "max_ms": 45000
   },
   "llm": {
     "enabled": false,
@@ -19,7 +21,6 @@
     "fallback": [],
     "timeout": 15,
     "max_tokens": 512,
-    "on_error": "local",
     "providers": {}
   },
   "apps": [],

@@ -175,33 +175,18 @@
       </div>
     </div>
 
-    <div class="section-title">AI 路由<span class="line"></span><button class="btn sm ghost" id="addProvBtn">添加服务商</button></div>
+    <div class="section-title">AI 模型<span class="line"></span><button class="btn sm ghost" id="addProvBtn">添加服务商</button></div>
     <div class="card">
       <div class="set-row">
-        <div class="grow"><div style="font-size:13px">启用 AI 兜底</div><div class="hint">关掉时完全走本地别名表，不发任何外部请求</div></div>
-        <label class="switch"><input type="checkbox" id="setLlmEnabled"><span></span></label>
-      </div>
-      <div class="set-row">
-        <div class="grow">
-          <div style="font-size:13px">什么时候问 AI</div>
-          <div class="hint" id="setLlmWhenHint">本地能确定时绝不惊动 AI，省时省钱也不外发隐私</div>
-        </div>
-        <select id="setLlmWhen">
-          <option value="never">从不用</option>
-          <option value="miss">本地没命中时</option>
-          <option value="ambiguous">命中但有歧义时</option>
-          <option value="always">总是先问 AI</option>
-        </select>
-      </div>
-      <div class="set-row">
-        <div class="grow"><div style="font-size:13px">默认服务商</div><div class="hint">失败会按顺序切到下一家</div></div>
+        <div class="grow"><div style="font-size:13px">默认服务商</div><div class="hint">失败会按顺序切到下一家。配好即启用，没有额外的开关。</div></div>
         <select id="setLlmDefault"></select>
       </div>
       <div id="provList" style="margin-top:6px"></div>
       <div class="set-row" style="margin-top:10px; margin-bottom:0">
         <div class="grow">
           <div style="font-size:13px">自检</div>
-          <div class="hint" id="probeHint">用一句真话走一遍识别层（只决定、不执行），看它到底走本地还是走 AI</div>
+          <div class="hint" id="probeHint">用一句真话走一遍「检索 → 选工具」（只决定、不执行），看清它手里到底有什么</div>
+          <input id="probeText" class="mono-input" style="margin-top:8px" placeholder="例如：硬盘还剩多少空间">
         </div>
         <button class="btn ghost" id="probeBtn">试一句</button>
       </div>
@@ -249,14 +234,63 @@
           <div class="hint">用户不会说 id，会这么说。这个字段比名字更影响命中率。</div>
         </div>
         <div class="field">
-          <label>端点地址</label>
-          <input id="wzUrl" class="mono-input" placeholder="http://mailnest:8006/mcp">
-          <div class="hint">应用自己要提供 HTTP 的 MCP 端点（一般是 /mcp）。容器之间用服务名，不要写 localhost；端口是容器内端口。</div>
+          <label>接入方式</label>
+          <div class="seg" id="wzTransport">
+            <button type="button" class="seg-btn on" data-t="mcp-http">MCP 服务</button>
+            <button type="button" class="seg-btn" data-t="cli">CLI 连接器</button>
+          </div>
+          <div class="hint">MCP：对方自己跑着 MCP 端点，网关连过去。CLI：对方只给命令行工具，网关在容器里替它跑。</div>
         </div>
-        <div class="field">
-          <label>访问令牌</label>
-          <input id="wzToken" type="password" placeholder="留空表示不需要鉴权">
-          <div class="hint">保存后只显示「已设置」，永远不会回传给前端。</div>
+
+        <div id="wzMcpFields">
+          <div class="field">
+            <label>端点地址</label>
+            <input id="wzUrl" class="mono-input" placeholder="http://mailnest:8006/mcp">
+            <div class="hint">应用自己要提供 HTTP 的 MCP 端点（一般是 /mcp）。容器之间用服务名，不要写 localhost；端口是容器内端口。</div>
+          </div>
+          <div class="field">
+            <label>访问令牌</label>
+            <input id="wzToken" type="password" placeholder="留空表示不需要鉴权">
+            <div class="hint">保存后只显示「已设置」，永远不会回传给前端。</div>
+          </div>
+        </div>
+
+        <div id="wzCliFields" class="hidden">
+          <div class="field">
+            <label>可执行文件</label>
+            <input id="wzCliBin" class="mono-input" placeholder="/data/connectors/nas/bin/unc">
+            <div class="hint">容器内路径。没有的话在下面下载地址里装一个，装完会自动填到这里。</div>
+          </div>
+          <div class="field">
+            <label>解释器参数（可选）</label>
+            <input id="wzCliPrefix" class="mono-input" placeholder="/data/connectors/nas/tool.js">
+            <div class="hint">可执行文件是个解释器时填这里。比如 <span class="mono">bin=node</span> + 这里是脚本路径 → 实际跑 <span class="mono">node 脚本.js 子命令</span>。直接用二进制工具就留空。</div>
+          </div>
+          <div class="field">
+            <label>固定参数</label>
+            <input id="wzCliArgs" class="mono-input" placeholder="--format json">
+            <div class="hint">每次调用都会带上。输出 JSON 的命令行工具一般靠这个开关（不同工具写法不同）。</div>
+          </div>
+          <div class="field">
+            <label>环境变量</label>
+            <textarea id="wzCliEnv" class="mono-input" rows="3" placeholder="NAS_URL=https://192.168.1.2:9443&#10;NAS_TOKEN=ugpoa_v1.xxx"></textarea>
+            <div class="hint">一行一个 <span class="mono">KEY=VALUE</span>。只注入这个应用的子进程，不影响网关；值存在 secrets.json，不回显。</div>
+          </div>
+          <div class="field">
+            <label>下载安装（可选）</label>
+            <input id="wzCliUrl" class="mono-input" placeholder="https://…/tool-linux-amd64.tar.gz">
+            <div style="display:flex; gap:8px; margin-top:8px">
+              <input id="wzCliSha" class="mono-input" placeholder="sha256（可选，填了就强制校验）">
+              <button type="button" class="btn sm" id="wzCliInstall">下载并解包</button>
+            </div>
+            <div class="hint" id="wzCliInstallOut"></div>
+          </div>
+          <div class="field">
+            <label style="display:flex; align-items:center; gap:6px; margin:0">
+              <input type="checkbox" id="wzCliGeneric"> 允许执行任意子命令（兜底）
+            </label>
+            <div class="hint">帮助信息解析不出来的工具（不是 cobra 那套格式）留这一条路：模型自己拼参数跑。危险等级按最高算，每次调用都要你确认。</div>
+          </div>
         </div>
         <div class="field">
           <label>允许的操作等级</label>

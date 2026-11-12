@@ -5,10 +5,13 @@
 // 拆开之后加字段只改一处，不会出现「后端写了、前端没读」这种半截改动。
 //
 // via 的含义（用户最关心的那列）：
-//   llm    —— 这句话是 AI 认出来的，会带 provider / model / token 用量
-//   local  —— 本地索引命中，零成本、零请求
+//   llm    —— AI 闭环里调的，会带 provider / model / token 用量
 //   ref    —— 用户回了个序号（「1」），引用上一轮列表
-//   其他    —— 菜单里手选、控制台手动执行，没有识别环节
+//   auto   —— 问的是内容，网关从上一轮清单里自己打开了最近的那条
+//   其他    —— 菜单里手选、控制台手动执行，没有选工具这一步
+//
+// 0.5.0 起没有本地匹配了，"本地命中"这种 via=local 的记录不再产生；
+// 读到老日志里的 local 会落到「其他」，显示成一个破折号。
 //
 // token 只在 via=llm 时有意义。用量的字段名各家不一样（OpenAI 系是
 // prompt/completion，Anthropic 是 input/output），在 llm.js 已统一成
@@ -41,14 +44,11 @@ export function formatCall(rec) {
     ms: rec.ms || 0,
     err: rec.err || null,
     via: rec.via || null,
-    // via=llm 才有；local 记录里保持 null，前端据此显示「—」而不是 0
+    // 只有 via=llm 才有；其余记录保持 null，前端据此显示「—」而不是 0
     provider: rec.provider || null,
     model: rec.model || null,
     tokIn,
     tokOut,
     tok,
-    // 只有「本该问 AI 但 AI 没接上、回落本地」才有值。不写进日志的话，
-    // 用户看到的就是一行干净的"本地"，完全不知道 AI 其实失败了。
-    aiErr: rec.aiError ? String(rec.aiError).slice(0, 160) : null,
   };
 }

@@ -5,7 +5,7 @@
 import http from 'node:http';
 import { Registry } from '../src/registry.js';
 import { routeWithLLM, listModels, normalizeUsage, LlmError } from '../src/llm.js';
-import { route } from '../src/router.js';
+import { probe } from '../src/router.js';
 
 const PORT = 3399;
 const seen = [];   // 记录收到的请求体，用于断言我们发了什么
@@ -136,7 +136,7 @@ const FAKE_TOOLS = [
 function makeRegistry() {
   const cfg = {
     gateway: { call_timeout: 20, confirm_risk: ['high'], default_app: null },
-    routing: { local_threshold: 0.5, ask_threshold: 0.25, llm_when: 'miss' },
+    routing: { search_limit: 8 },
     apps: [],
   };
   const reg = new Registry(cfg);
@@ -155,13 +155,13 @@ function makeRegistry() {
 function cfgWith(provider) {
   return {
     gateway: { call_timeout: 20, confirm_risk: ['high'] },
-    routing: { local_threshold: 0.5, ask_threshold: 0.25, llm_when: 'miss' },
+    routing: { search_limit: 8 },
+    agent: { max_rounds: 4, max_ms: 15000 },
     llm: {
       enabled: true,
       default: 'p',
       timeout: 5,
       max_tokens: 256,
-      on_error: 'local',
       providers: { p: provider },
     },
     apps: [],
@@ -251,15 +251,15 @@ async function main() {
 
   console.log('\n=== 模型只回话、不选工具（不支持 tool calling 的典型形态）===');
   {
+    // 端点直接回一句人话、不调工具。自检要如实报「它只回话没干活」，
+    // 并把原话带回来 —— 否则用户只看到"没选工具"，不知道它在聊什么。
     const cfg = cfgWith({ type: 'openai', base_url: `http://127.0.0.1:${PORT}/chatty`, model: 'm', api_key: 'k' });
-    cfg.routing.llm_when = 'always';
-    const r = await route('有几封未读邮件', { registry: reg, config: cfg });
-    ok('结果是「说话」而不是执行', r.kind === 'say', String(r.kind));
-    ok('把模型原话带回来，界面才能说明它没干活', /只能陪你聊天/.test(r.text || ''), String(r.text));
-    ok('仍然是 via=llm（确实连上过，不是没接）', r.via === 'llm', String(r.via));
+    const d = await probe('有几封未读邮件', { registry: reg, config: cfg });
+    ok('结果是「说话」而不是执行', d.kind === 'say', String(d.kind));
+    ok('把模型原话带回来', /只能陪你聊天/.test(d.reply || ''), String(d.reply));
   }
 
-  console.log('\n=== 失败与降级 ===');
+  console.log('\n=== 失败时不留悬空 ===');
   {
     const cfg = cfgWith({ type: 'openai', base_url: 'http://127.0.0.1:1/v1', model: 'dead', api_key: 'k' });
     let err = null;
@@ -269,67 +269,21 @@ async function main() {
     ok('连不上时抛 LlmError', err instanceof LlmError, String(err));
     ok('错误类型是 network', err?.kind === 'network', err?.kind);
 
-    // route 撞上 AI 挂掉，必须回落而不是崩溃
-    const r = await route('把冰箱温度调低', { registry: reg, config: cfg });
-    ok('route 不抛异常，返回菜单', r.kind === 'menu', r.kind);
-    ok('菜单里带了失败原因', /连不上|失败/.test(r.note || ''), r.note);
-    ok('菜单里仍有可选项', Array.isArray(r.candidates) && r.candidates.length > 0);
+    // 自检（设置页那个「试一句」）撞上 AI 挂掉，必须给出可读原因而不是抛异常
+    const d = await probe('把冰箱温度调低', { registry: reg, config: cfg });
+    ok('自检不抛异常', d && typeof d === 'object');
+    ok('自检说清没接上', d.kind === 'none' && !!d.error, JSON.stringify({ kind: d.kind, error: d.error }));
+    ok('自检把模型试过的检索词带回来', Array.isArray(d.queries), JSON.stringify(d.queries));
   }
 
-  console.log('\n=== 本地命中时不该惊动 AI ===');
+  console.log('\n=== 没配模型就没大脑（本地匹配已删）===');
   {
     const cfg = cfgWith({ type: 'openai', base_url: `http://127.0.0.1:${PORT}/v1`, model: 'mock-1', api_key: 'k' });
+    cfg.llm = { enabled: false, providers: {} };
     const before = seen.length;
-    const r = await route('发送消息给老王', { registry: reg, config: cfg });
-    ok('走的是本地索引', r.via === 'local', String(r.via));
-    ok('没有发出任何 AI 请求', seen.length === before, `${seen.length - before} 次`);
-  }
-
-  console.log('\n=== llm_when 配置生效 ===');
-  {
-    const cfg = cfgWith({ type: 'openai', base_url: `http://127.0.0.1:${PORT}/v1`, model: 'mock-1', api_key: 'k' });
-    cfg.routing.llm_when = 'never';
-    const r = await route('把冰箱温度调低', { registry: reg, config: cfg });
-    ok('never 模式下不调 AI', r.kind === 'menu' && r.note === '没听懂', String(r.note));
-  }
-
-  console.log('\n=== 四档 llm_when 互不相同（「命中但有歧义」原来形同虚设）===');
-  {
-    // 这一档原来和「本地没命中时」完全一样：confident 分支提前 return，
-    // ambiguous 的判断写在它后面，永远走不到。用假 registry 直接钉分支。
-    const T = { key: 'fake.send', name: 'send', title: '发送消息', appLabel: '测试', risk: 'read' };
-    const fake = (confident, ambiguous) => ({
-      tools: [T],
-      match: () => ({
-        confident, ambiguous, understood: true,
-        best: { tool: T, score: 0.6 },
-        candidates: [{ tool: T, score: 0.6 }],
-        appId: null,
-      }),
-      llmTools: () => [{ name: 'fake.send', description: '发送消息', inputSchema: { type: 'object', properties: {} } }],
-      find: (k) => (k === 'fake.send' ? T : null),
-    });
-    const cfgMode = (mode) => {
-      const c = cfgWith({ type: 'openai', base_url: `http://127.0.0.1:${PORT}/v1`, model: 'mock-1', api_key: 'k' });
-      c.routing.llm_when = mode;
-      return c;
-    };
-
-    let before = seen.length;
-    const a = await route('随便说一句', { registry: fake(true, true), config: cfgMode('ambiguous') });
-    ok('ambiguous：分数达标但有歧义 → 问 AI', seen.length > before && a.via === 'llm', `${a.via} / ${seen.length - before} 次`);
-
-    before = seen.length;
-    const b = await route('随便说一句', { registry: fake(true, true), config: cfgMode('miss') });
-    ok('miss：同样有歧义也不问，直接执行', seen.length === before && b.via === 'local', `${b.via} / ${seen.length - before} 次`);
-
-    before = seen.length;
-    const c2 = await route('随便说一句', { registry: fake(true, false), config: cfgMode('ambiguous') });
-    ok('ambiguous：无歧义时仍走本地，不多花一次请求', seen.length === before && c2.via === 'local', `${c2.via} / ${seen.length - before} 次`);
-
-    before = seen.length;
-    const d2 = await route('随便说一句', { registry: fake(false, false), config: cfgMode('never') });
-    ok('never：不自信时也只回菜单，不碰 AI', seen.length === before && d2.kind === 'menu', `${d2.kind} / ${seen.length - before} 次`);
+    const d = await probe('发送消息给老王', { registry: reg, config: cfg });
+    ok('没配模型时不发任何请求', seen.length === before, `${seen.length - before} 次`);
+    ok('并且明说没接上', d.kind === 'none' && /服务商|模型/.test(d.error || ''), String(d.error));
   }
 
   console.log('\n=== token 用量归一化（各家字段名不一样）===');

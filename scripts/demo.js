@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { loadConfig } from '../src/config.js';
 import { Registry } from '../src/registry.js';
-import { route, renderMenu } from '../src/router.js';
+import { probe, renderMenu, menuList } from '../src/router.js';
 
 const MAILBOX = 'D:/workbuddy/mailbox';
 const PORT = Number(process.env.DEMO_PORT || 3381);
@@ -89,7 +89,7 @@ async function main() {
   // 写一份配置：故意只手工补两条别名，其余全靠自动派生
   const cfgObj = {
     gateway: { confirm_risk: ['high'], call_timeout: 20 },
-    routing: { local_threshold: 0.5, ask_threshold: 0.25, llm_when: 'miss' },
+    routing: { search_limit: 8 },
     llm: { enabled: false, providers: {} },
     apps: [{
       id: 'mail',
@@ -131,7 +131,7 @@ async function main() {
   console.log(`\n=== 索引 ===\n  工具 ${registry.tools.length} 个，全部由 tools/list 自动派生；` +
     `配置里人工只补了 ${manual} 条别名。`);
 
-  console.log('\n=== 中文匹配（纯本地，未接 AI）===');
+  console.log('\n=== 中文检索（只排序，不做决定）===');
   const queries = [
     '查一下未读',
     '收件箱有什么',
@@ -145,26 +145,22 @@ async function main() {
     '今天天气怎么样',
   ];
   for (const q of queries) {
-    const m = registry.match(q);
-    const top = m.candidates.slice(0, 2)
-      .map((c) => `${c.tool.key} ${c.score.toFixed(2)}`)
-      .join('  ');
-    const flag = m.confident ? '直接执行' : m.understood ? '回菜单问' : '没听懂';
-    console.log(`  ${pad('「' + q + '」', 22)}→ ${pad(flag, 8)}${top || '（无候选）'}`);
+    const { results } = registry.search(q, { limit: 2 });
+    const top = results.map((c) => `${c.tool.key} ${c.score.toFixed(2)}`).join('  ');
+    console.log(`  ${pad('「' + q + '」', 22)}→ ${top || '（无候选）'}`);
   }
 
-  console.log('\n=== 走一遍完整决定 ===');
+  // 决定交给模型。这里没配服务商，所以自检会如实说"没接上"——
+  // 这正是新架构下用户没配模型时会看到的样子。
+  console.log('\n=== 自检（没配模型时的真实表现）===');
   for (const q of ['查一下未读', '今天天气怎么样']) {
-    const d = await route(q, { registry, config });
-    if (d.kind === 'call') {
-      console.log(`  「${q}」→ 调用 ${d.tool.key}（via ${d.via}，分数 ${d.score?.toFixed(2)}）`);
-    } else if (d.kind === 'menu') {
-      console.log(`  「${q}」→ 回菜单：`);
-      console.log(renderMenu(d.candidates.slice(0, 4), d.note).split('\n').map((l) => '      ' + l).join('\n'));
-    } else {
-      console.log(`  「${q}」→ ${d.kind}: ${d.text || d.error || ''}`);
-    }
+    const d = await probe(q, { registry, config });
+    console.log(`  「${q}」→ ${d.kind}${d.error ? '：' + d.error : ''}` +
+      (d.candidates.length ? `（检索到 ${d.candidates.length} 个候选）` : ''));
   }
+
+  console.log('\n=== 菜单（纯展示，不做决定）===');
+  console.log(renderMenu(menuList(registry, null, 4), '当前可用：').split('\n').map((l) => '  ' + l).join('\n'));
 
   console.log('\n=== 真正执行一次工具调用 ===');
   const target = registry.find('mail.list_accounts');

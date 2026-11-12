@@ -10,13 +10,14 @@
   },
   "scripts": {
     "start": "node src/server.js",
-    "test": "node scripts/e2e.js && node scripts/test-loop.js",
+    "test": "node scripts/e2e.js && node scripts/test-loop.js && node scripts/test-cli.js",
     "test:auth": "node scripts/test-auth.js",
     "test:llm": "node scripts/test-llm.js",
     "test:store": "node scripts/test-store.js",
     "demo": "node scripts/demo.js",
     "mock:mcp": "node scripts/mock-mcp.js",
     "mock:ilink": "node scripts/mock-ilink.js",
-    "test:loop": "node scripts/test-loop.js"
+    "test:loop": "node scripts/test-loop.js",
+    "test:cli": "node scripts/test-cli.js"
   }
 }
